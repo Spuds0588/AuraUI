@@ -1,0 +1,13 @@
+# Editor and tool metadata, not project source.
+.freebuff/
+
+node_modules/
+dist/
+src-tauri/target/
+*.log
+.DS_Store
+.env
+.env.local
+__pycache__/
+*.pyc
+.venv/

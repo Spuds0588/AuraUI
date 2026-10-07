@@ -1,0 +1,47 @@
+{
+  "name": "auraui-client",
+  "version": "0.1.0",
+  "description": "Ask a person for a decision from inside an agent: a dependency-free client for the AuraUI Human-in-the-Loop bridge.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./auraui-client.mjs",
+  "types": "./auraui-client.d.ts",
+  "exports": {
+    ".": {
+      "types": "./auraui-client.d.ts",
+      "default": "./auraui-client.mjs"
+    }
+  },
+  "files": [
+    "auraui-client.mjs",
+    "auraui-client.d.ts",
+    "README.md"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "hitl",
+    "human-in-the-loop",
+    "agents",
+    "llm",
+    "ui",
+    "websocket",
+    "tauri"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/auraui/auraui.git",
+    "directory": "clients/ts"
+  },
+  "homepage": "https://github.com/auraui/auraui",
+  "peerDependencies": {
+    "ws": "^8"
+  },
+  "peerDependenciesMeta": {
+    "ws": {
+      "optional": true
+    }
+  }
+}

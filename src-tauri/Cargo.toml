@@ -1,0 +1,53 @@
+[package]
+name = "auraui"
+version = "0.1.0"
+description = "AuraUI - local Human-in-the-Loop bridge between AI agents and an interactive canvas"
+authors = ["AuraUI"]
+edition = "2021"
+rust-version = "1.77"
+license = "MIT"
+default-run = "auraui"
+
+# The desktop shell. Runs the bridge and hosts the webview canvas.
+[[bin]]
+name = "auraui"
+path = "src/main.rs"
+
+# Headless bridge. Same WebSocket server and session logic, no GUI.
+# Used for CI, protocol tests, and agents talking to AuraUI on a machine with no display.
+[[bin]]
+name = "auraui-bridge"
+path = "src/bin/auraui-bridge.rs"
+
+[lib]
+name = "auraui_lib"
+path = "src/lib.rs"
+crate-type = ["lib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "io-util"] }
+tokio-tungstenite = "0.24"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tokio-tungstenite = "0.24"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+serde_json = "1"
+
+[features]
+# this feature is used for production builds or when a dev server is not specified, DO NOT REMOVE!!
+custom-protocol = ["tauri/custom-protocol"]
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true

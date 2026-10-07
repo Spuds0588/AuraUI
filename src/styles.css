@@ -1,0 +1,90 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * AuraUI is a dark-only surface on purpose: it sits next to a terminal all day, and the
+ * human is usually reading a diff, a chart or a table rather than a marketing page.
+ */
+@layer base {
+  :root {
+    --background: 222 47% 6%;
+    --foreground: 210 40% 96%;
+    --card: 222 42% 9%;
+    --card-foreground: 210 40% 96%;
+    --popover: 222 46% 8%;
+    --popover-foreground: 210 40% 96%;
+    --primary: 243 75% 66%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 217 33% 15%;
+    --secondary-foreground: 210 40% 96%;
+    --muted: 217 33% 14%;
+    --muted-foreground: 215 20% 62%;
+    --accent: 189 94% 43%;
+    --accent-foreground: 222 47% 8%;
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 217 33% 18%;
+    --input: 217 33% 20%;
+    --ring: 243 75% 66%;
+    --radius: 0.75rem;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+    /* Transparent, not the app's background colour: the overlay window is a transparent
+       frame over the desktop, so anything opaque here would black out the whole screen
+       even when AuraUI has nothing to show. */
+    background: transparent;
+  }
+
+  body {
+    @apply text-foreground antialiased;
+    font-feature-settings: "cv11", "ss01";
+    overflow: hidden;
+  }
+
+  ::selection {
+    background: hsl(var(--primary) / 0.35);
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    @apply rounded-full border-2 border-solid border-transparent bg-muted bg-clip-content;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background-color: hsl(var(--muted-foreground) / 0.4);
+    background-clip: content-box;
+  }
+
+  :focus-visible {
+    @apply outline-none ring-2 ring-ring ring-offset-2 ring-offset-background;
+  }
+}
+
+@layer components {
+  /*
+   * The veil behind a question.
+   *
+   * The window is transparent, so this dims the human's actual desktop rather than a
+   * background of our own — which is the point: you can still see the thing you were
+   * looking at when the agent interrupted you, just pushed back.
+   */
+  .overlay-scrim {
+    @apply absolute inset-0;
+    background-color: hsl(var(--background) / 0.72);
+    backdrop-filter: blur(3px);
+  }
+}

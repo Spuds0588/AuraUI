@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "auraui"
+version = "0.1.0"
+description = "Human-in-the-Loop bridge client: ask a person for a decision from inside an AI agent."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+# Deliberately empty. The WebSocket transport is implemented on the standard library so an
+# agent author can drop this package into any environment, including a locked-down one.
+dependencies = []
+keywords = ["hitl", "human-in-the-loop", "agents", "llm", "ui", "websocket"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+  "Typing :: Typed",
+]
+
+[project.urls]
+Homepage = "https://github.com/auraui/auraui"
+Documentation = "https://github.com/auraui/auraui/blob/main/docs/PROTOCOL.md"
+
+[tool.setuptools]
+packages = ["auraui"]
+
+[tool.setuptools.package-data]
+auraui = ["py.typed"]
