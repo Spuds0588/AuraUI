@@ -85,7 +85,13 @@ export interface AckFrame {
   v: string;
   type: "ack";
   taskId: string;
-  status: "rendered" | "updated" | "resolved" | "unknown";
+  status: "rendered" | "queued" | "updated" | "resolved" | "unknown";
+  /**
+   * The confirmation half of asking a person anything, present on a `task` ack only:
+   * "your question is up, expect roughly this long, and here is how often you will hear from
+   * me in the meantime". Nothing here times a question out.
+   */
+  wait?: { estimatedMs: number; pollIntervalMs: number; expiresAt: number };
 }
 
 /** What `task()` resolves with: the human's answer to one task. */
@@ -306,12 +312,68 @@ export interface TaskRequest {
   timeout?: number;
 }
 
+/** One question inside an `askMany()` run. */
+export interface AskQuestion {
+  /**
+   * Becomes this question's task id. The answer comes back keyed by it, and it is what
+   * `resolve()`, `waitFor()` and `answers()` name.
+   */
+  id: string;
+  component: ComponentName;
+  props: Record<string, unknown>;
+  /** Shown on this question's card. The run's own sentence is the fallback. */
+  instruction?: string;
+  urgent?: boolean;
+}
+
+/** How many questions one `run` may carry. The bridge refuses a longer one. */
+export declare const RUN_LIMIT: number;
+
+export interface AnswersRequest {
+  /** Only these tasks. Omitted asks for everything the bridge still keeps. */
+  taskIds?: string[];
+  /** Seconds to wait for the reply. Default 5. */
+  timeout?: number;
+}
+
+/**
+ * A check-in on a question nobody has answered yet.
+ *
+ * Sent on a timer while a card is up and immediately whenever the human touches it, so an
+ * agent blocked on a person hears "still answering, here is what they have picked so far"
+ * instead of watching a silent socket.
+ */
+export interface ProgressFrame {
+  taskId: string;
+  /** `waiting` until the human touches the card, `answering` from then on. */
+  state: "waiting" | "answering";
+  elapsedMs: number;
+  estimatedMs: number;
+  /** Saturates at zero when the wait has outlasted the estimate. */
+  remainingMs: number;
+  /** Partial answers, newest first. Empty until the human does something. */
+  signals: Array<{ event: string; payload: unknown; at: number }>;
+  at: number;
+}
+
+/** An answer the bridge kept for an agent that was not waiting when it landed. */
+export interface RetainedAnswer {
+  taskId: string;
+  event: string;
+  payload: Record<string, unknown>;
+  /** The `seq` the live event carried, so a replayed answer and a seen one are the same. */
+  seq: number;
+  at: number;
+}
+
 export type AgentEventName =
   | "welcome"
   | "event"
   | "signal"
   | "answered"
   | "ack"
+  | "progress"
+  | "answers"
   | "error"
   | "close"
   | "reconnecting"
@@ -357,13 +419,46 @@ export declare class Agent {
    */
   task(request: TaskRequest): Promise<TaskAnswer>;
 
+  /**
+   * Ask several questions in one call and get every answer back together.
+   *
+   * One request, several cards: each question is drawn on its own and answered with one press,
+   * but the set arrives as a run — the card says "Question 2 of 4" — and this resolves once,
+   * with the answers in the order asked. Use it for questions you already know you need;
+   * split back into `task()` calls where each question depends on the answer to the last.
+   */
+  askMany(
+    questions: AskQuestion[],
+    request?: { runId?: string; instruction?: string; timeout?: number },
+  ): Promise<{ runId: string; answers: TaskAnswer[] }>;
+
   /** Withdraw a task before the human answers it. */
   resolve(taskId: string, reason?: string): void;
 
-  /** Queue a transient toast. */
-  notify(level: NoticeLevel, message: string): void;
+  /**
+   * Ask for answers the bridge kept: what the human said while nobody was waiting.
+   *
+   * The one thing a blocking call cannot answer for itself. AuraUI keeps every terminal event
+   * for a while, so an agent that hit its own deadline, or one restarted mid-question, can
+   * collect the answer instead of asking the person to answer twice.
+   */
+  answers(request?: AnswersRequest): Promise<RetainedAnswer[]>;
 
-  /** Narrate what the agent is doing; the newest note shows as one line while the canvas is idle. */
+  /**
+   * Keep waiting on a question this call did not wait for.
+   *
+   * Resolves from what the bridge kept if the human has since answered, and otherwise watches
+   * the socket for the terminal event exactly as `task()` would have. This is how an agent
+   * hands a wait back to the framework rather than sleeping on its own thread.
+   */
+  waitFor(taskId: string, request?: { timeout?: number }): Promise<TaskAnswer>;
+
+  /**
+   * Narrate what the agent is doing; the newest note shows as one line while the canvas is
+   * idle. This is the only way an agent says something without asking something: there is no
+   * toast, because chrome in the corner of someone else's screen says less than one quiet line
+   * inside the canvas they are already looking at.
+   */
   note(text: string, kind?: NoteKind): void;
 
   /** Patch a live task, e.g. to feed a chart drill-down after a `filter` event. */
@@ -379,6 +474,8 @@ export declare class Agent {
   on(event: "welcome", handler: (frame: WelcomeFrame) => void): () => void;
   on(event: "event" | "signal" | "answered" | "orphan", handler: (answer: TaskAnswer) => void): () => void;
   on(event: "ack", handler: (frame: AckFrame) => void): () => void;
+  on(event: "progress", handler: (frame: ProgressFrame) => void): () => void;
+  on(event: "answers", handler: (items: RetainedAnswer[]) => void): () => void;
   on(event: "error", handler: (error: AuraUIError, frame?: ErrorFrame) => void): () => void;
   on(event: "close", handler: (info: { code: number; reason: string }) => void): () => void;
   on(event: "reconnecting", handler: (info: { attempt: number; delay: number }) => void): () => void;

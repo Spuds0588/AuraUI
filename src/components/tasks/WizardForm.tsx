@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import {
   Badge,
@@ -11,6 +11,7 @@ import {
   Textarea,
 } from "@/components/ui";
 import type { TaskComponentProps } from "@/components/renderer/types";
+import { optionKeys, useOptionKeys } from "@/lib/keyboard";
 import type { AudioClip, Field, WizardFormProps, WizardStep } from "@/lib/protocol";
 import { appendSpeech, useVoiceInput } from "@/lib/voice";
 import { cn } from "@/lib/utils";
@@ -209,6 +210,32 @@ export default function WizardForm({
     },
   });
 
+  // The one field on this step whose options can take number keys. A step carrying more than
+  // one such field has no unambiguous first option, so it binds nothing and the buttons still
+  // work exactly as they did.
+  const keyedField = useMemo(() => {
+    const withOptions = (steps[safeIndex]?.fields ?? []).filter(
+      (field) => (field.options?.length ?? 0) > 0,
+    );
+    return withOptions.length === 1 ? withOptions[0] : undefined;
+  }, [steps, safeIndex]);
+  const stepKeys = useMemo(() => optionKeys(keyedField?.options?.length ?? 0), [keyedField]);
+
+  useOptionKeys(() => {
+    const field = keyedField;
+    if (!field) return [];
+    // The same `multi` flag the buttons are drawn with, because a number key has to answer the
+    // question the same way a press does. Passing one value here and another to `ChoiceButtons`
+    // is how a `multi` ends up holding a bare string: no chip lights up, and the agent gets a
+    // selection it never offered.
+    const multi = field.type === "multi";
+    return (field.options ?? []).map((option, index) => ({
+      key: stepKeys[index] ?? "",
+      run: () => pickOption(field, option.value, multi, safeIndex),
+      disabled: locked,
+    }));
+  });
+
   const setValue = useCallback(
     (field: Field, value: unknown) => {
       setValues((current) => ({ ...current, [field.name]: value }));
@@ -223,6 +250,40 @@ export default function WizardForm({
     },
     [live, respond],
   );
+
+  /**
+   * One press on one option of a field, from the pointer or from a number key.
+   *
+   * Both routes land here so a shortcut cannot answer a question differently from a click —
+   * including the one-press rule, which moves the step on whichever way the option was chosen.
+   */
+  const pickOption = (field: Field, next: string, multi: boolean, at: number) => {
+    if (locked) return;
+
+    if (!multi) {
+      // The press is the answer when this step is the one question it looks like: it records
+      // the choice and moves on in the same gesture. No `change` on the way out — there is no
+      // longer a moment where the human is still deciding.
+      if (answersInOnePress(steps[at])) {
+        completeStep(field, next, at);
+        return;
+      }
+      // Re-clicking the answer that is already on keeps it: picking again is not the same
+      // thing as taking the answer back.
+      setValue(field, next);
+      return;
+    }
+
+    const current = Array.isArray(values[field.name])
+      ? (values[field.name] as unknown[]).map(String)
+      : [];
+    setValue(
+      field,
+      current.includes(next)
+        ? current.filter((entry) => entry !== next)
+        : [...current, next],
+    );
+  };
 
   /**
    * One button array, shared by `choice` and `multi`.
@@ -256,29 +317,31 @@ export default function WizardForm({
         options={options}
         value={current}
         disabled={locked}
-        onToggle={(next) => {
-          if (!multi) {
-            // The press is the answer when this step is the one question it looks like:
-            // it records the choice and moves on in the same gesture. No `change` on the
-            // way out — there is no longer a moment where the human is still deciding.
-            if (answersInOnePress(steps[at])) {
-              completeStep(field, next, at);
-              return;
-            }
-            // Re-clicking the answer that is already on keeps it: picking again is not
-            // the same thing as taking the answer back.
-            setValue(field, next);
-            return;
-          }
-          setValue(
-            field,
-            current.includes(next)
-              ? current.filter((entry) => entry !== next)
-              : [...current, next],
-          );
-        }}
+        keyHints={keyedField?.name === field.name ? stepKeys : undefined}
+        onToggle={(next) => pickOption(field, next, multi, at)}
       />
     );
+  };
+
+  /**
+   * What a bare Enter means in a field that holds one line.
+   *
+   * It means "done with this one", which is exactly what the button underneath says: the next
+   * step, or the end of the form. A `textarea` is deliberately excluded — there Enter is a
+   * newline, and nobody means "I have finished my explanation" by it.
+   */
+  const onFieldEnter = (event: ReactKeyboardEvent) => {
+    if (event.key !== "Enter" || event.metaKey || event.ctrlKey || event.altKey) return;
+    event.preventDefault();
+    if (isLast) submitValues(values);
+    else goNext();
+  };
+
+  /** Answer the form from inside a paragraph, where a bare Enter belongs to the paragraph. */
+  const onFieldSend = (event: ReactKeyboardEvent) => {
+    if (event.key !== "Enter" || !(event.metaKey || event.ctrlKey)) return;
+    event.preventDefault();
+    submitValues(values);
   };
 
   function renderField(field: Field) {
@@ -343,6 +406,7 @@ export default function WizardForm({
             placeholder={field.placeholder}
             disabled={locked}
             aria-invalid={Boolean(error)}
+            onKeyDown={onFieldSend}
             onChange={(event) => setValue(field, event.target.value)}
           />
         ) : field.type === "choice" ? (
@@ -360,6 +424,7 @@ export default function WizardForm({
             placeholder={field.placeholder}
             disabled={locked}
             aria-invalid={Boolean(error)}
+            onKeyDown={onFieldEnter}
             onChange={(event) => setValue(field, event.target.value)}
           />
         ) : field.type === "date" ? (
@@ -369,6 +434,7 @@ export default function WizardForm({
             value={textOf(value)}
             disabled={locked}
             aria-invalid={Boolean(error)}
+            onKeyDown={onFieldEnter}
             onChange={(event) => setValue(field, event.target.value)}
           />
         ) : (
@@ -379,6 +445,7 @@ export default function WizardForm({
             placeholder={field.placeholder}
             disabled={locked}
             aria-invalid={Boolean(error)}
+            onKeyDown={onFieldEnter}
             onChange={(event) => setValue(field, event.target.value)}
           />
         )}

@@ -43,6 +43,90 @@ export interface TaskFrame {
   props: ComponentProps;
   /** Mark the task visually as needing a decision (adds an accent border). */
   urgent?: boolean;
+  /**
+   * Present when this question arrived as part of one `run`.
+   *
+   * The bridge expands a run before the canvas ever sees it, so a question in a run is an
+   * ordinary task in every other respect: same ack, same events, same retention, same queue.
+   * This only carries where it sits in the set, which is what lets the card say so.
+   */
+  run?: RunSlot;
+}
+
+/** Where one question sits inside the run that asked it. Mirrors `RunSlot` in Rust. */
+export interface RunSlot {
+  runId: string;
+  /** Zero-based. */
+  index: number;
+  total: number;
+  /** The run's own sentence, repeated on every card of the set. */
+  instruction?: string;
+}
+
+/** One question inside a run, as the agent writes it. */
+export interface RunQuestion {
+  /** Becomes this question's task id, so its answer comes back keyed by this. */
+  id: string;
+  component: ComponentName;
+  instruction?: string;
+  props: ComponentProps;
+  urgent?: boolean;
+}
+
+/**
+ * Several questions asked in one call.
+ *
+ * The canvas never receives one of these — the bridge turns it into a `task` per question so
+ * that nothing downstream needs a second code path — but it is the frame an agent writes, and
+ * the answer is one payload keyed by question id.
+ */
+export interface RunFrame {
+  v: string;
+  type: "run";
+  runId: string;
+  /** One sentence for the whole set, drawn on every card of the run. */
+  instruction?: string;
+  questions: RunQuestion[];
+}
+
+/** How many questions one run may carry. Mirrors `RUN_LIMIT` in Rust. */
+export const RUN_LIMIT = 12;
+
+/**
+ * Turn a run into the questions the canvas already knows how to draw.
+ *
+ * The bridge does this for real, and refuses a malformed run before a single card is drawn.
+ * This mirror exists for demo mode, where there is no bridge and the script *is* the agent;
+ * it trusts what it is given and simply drops anything it cannot place, because a scripted
+ * demo that throws mid-timer would take the canvas with it.
+ */
+export function expandRun(frame: RunFrame): TaskFrame[] {
+  const questions = Array.isArray(frame.questions) ? frame.questions : [];
+  const runId = typeof frame.runId === "string" ? frame.runId : "";
+  if (runId === "" || questions.length === 0 || questions.length > RUN_LIMIT) return [];
+
+  const total = questions.length;
+  const seen = new Set<string>();
+  const tasks: TaskFrame[] = [];
+
+  questions.forEach((question, index) => {
+    const id = typeof question?.id === "string" ? question.id : "";
+    if (id === "" || seen.has(id)) return;
+    if (!isComponentName(question?.component)) return;
+    seen.add(id);
+    tasks.push({
+      v: frame.v,
+      type: "task",
+      taskId: id,
+      component: question.component,
+      instruction: question.instruction,
+      props: question.props,
+      urgent: question.urgent ? true : undefined,
+      run: { runId, index, total, instruction: frame.instruction },
+    });
+  });
+
+  return tasks;
 }
 
 export interface UpdateFrame {
@@ -60,15 +144,17 @@ export interface ResolveFrame {
   reason?: string;
 }
 
-export interface NotifyFrame {
-  v: string;
-  type: "notify";
-  level: "info" | "success" | "warn" | "error";
-  message: string;
-}
-
 /** A line of narration. Shown as one quiet line while the canvas is idle, and cheap: it
- * never expects a reply and is never queued behind a question. */
+ * never expects a reply and is never queued behind a question.
+ *
+ * This is the *only* way an agent says something without asking something, and that is
+ * deliberate. There used to be a `notify` frame as well, which floated a toast in the corner
+ * of the human's screen; it was removed because it duplicated this one badly. A toast is
+ * chrome parked on top of someone else's work, it cannot be read once it has faded, and it
+ * said nothing a `note` does not say more quietly and in the same place as everything else.
+ *
+ * A `note` is not a place to hide an answer, either. It is narration, and a question is only
+ * ever asked with a `task`. */
 export interface NoteFrame {
   v: string;
   type: "note";
@@ -84,9 +170,10 @@ export interface PingFrame {
 export type AgentFrame =
   | HelloFrame
   | TaskFrame
+  /** Expanded into `TaskFrame`s by the bridge, so the canvas is not expected to see one. */
+  | RunFrame
   | UpdateFrame
   | ResolveFrame
-  | NotifyFrame
   | NoteFrame
   | PingFrame;
 
@@ -117,6 +204,81 @@ export interface AckFrame {
    * should always be able to answer "did anyone actually see this?".
    */
   status: "rendered" | "queued" | "updated" | "resolved" | "unknown";
+  /**
+   * The confirmation half of asking a person anything, present on a `task` ack and absent on
+   * every other kind: "your question is up, expect roughly this long, and here is how often
+   * you will hear from me in the meantime".
+   *
+   * Nothing here times a question out. The human answers when they answer; an agent that
+   * wanted a hard deadline has to impose its own, and then ask again with `answers`.
+   */
+  wait?: WaitPlan;
+}
+
+/** Mirrors `WaitPlan` in `src-tauri/src/protocol.rs`. */
+export interface WaitPlan {
+  estimatedMs: number;
+  pollIntervalMs: number;
+  /** Unix epoch milliseconds: `estimatedMs` after the ack was stamped. */
+  expiresAt: number;
+}
+
+/**
+ * How far along a question is, from the canvas's point of view.
+ *
+ * `waiting` means nobody has touched the card; `answering` means they have. The distinction
+ * is the whole reason these frames exist: from the outside, a person reading a question and a
+ * person who left the room look exactly alike.
+ */
+export type WaitState = "waiting" | "answering";
+
+/** One non-terminal thing the human has done on a card. */
+export interface Signal {
+  event: EventName;
+  payload?: unknown;
+  at: number;
+}
+
+/**
+ * A check-in on a question nobody has answered yet.
+ *
+ * Sent on a timer while a card is up, and immediately whenever the human touches it. It is
+ * what an agent that is blocked on a person has instead of a spinner: partial answers stream
+ * back as they are made (`signals`), so a half-filled form can be acted on before the end.
+ */
+export interface ProgressFrame {
+  v: string;
+  type: "progress";
+  taskId: string;
+  state: WaitState;
+  elapsedMs: number;
+  estimatedMs: number;
+  /** Saturates at zero: a wait past the estimate is still a wait. */
+  remainingMs: number;
+  /** Newest first. Omitted when the human has only looked at the card. */
+  signals?: Signal[];
+  at: number;
+}
+
+/**
+ * An answer the bridge kept for an agent that was not waiting.
+ *
+ * The `seq` is the one the live event carried, so a replayed answer and a seen one are the
+ * same event.
+ */
+export interface RetainedAnswer {
+  taskId: string;
+  event: EventName;
+  payload?: unknown;
+  seq: number;
+  at: number;
+}
+
+/** The reply to an `answers` request: what the human said while nobody was listening. */
+export interface AnswersFrame {
+  v: string;
+  type: "answers";
+  items: RetainedAnswer[];
 }
 
 export interface EventFrame<E extends EventName = EventName> {
@@ -148,6 +310,8 @@ export type CanvasFrame =
   | WelcomeFrame
   | AckFrame
   | EventFrame
+  | ProgressFrame
+  | AnswersFrame
   | ErrorFrame
   | PongFrame;
 
@@ -544,13 +708,13 @@ export interface AgentConnection {
   since: number;
 }
 
-export interface Notice {
-  id: string;
-  level: "info" | "success" | "warn" | "error";
-  message: string;
-  at: number;
-}
-
+/**
+ * A line of narration, exactly as `note` carried it.
+ *
+ * The canvas's only channel in the corner used to be a toast, and both halves of it are gone:
+ * no agent frame can raise one, and the canvas no longer raises any of its own. Everything
+ * worth saying is said in the middle of the screen, on a card, or in one quiet idle line.
+ */
 export interface Note {
   id: string;
   text: string;
@@ -564,7 +728,6 @@ export interface CanvasState {
   bridgeUrl: string;
   connected: AgentConnection[];
   tasks: LiveTask[];
-  notices: Notice[];
   notes: Note[];
 }
 
@@ -630,11 +793,6 @@ export function parseAgentFrame(raw: unknown): AgentFrame {
         throw new ProtocolError("bad_frame", `\`${type}.taskId\` must be a non-empty string.`);
       }
       return { ...(frame as unknown as UpdateFrame | ResolveFrame), v: PROTOCOL_VERSION };
-    case "notify":
-      if (typeof frame.message !== "string") {
-        throw new ProtocolError("bad_frame", "`notify.message` must be a string.");
-      }
-      return { ...(frame as unknown as NotifyFrame), v: PROTOCOL_VERSION };
     case "note":
       if (typeof frame.text !== "string") {
         throw new ProtocolError("bad_frame", "`note.text` must be a string.");

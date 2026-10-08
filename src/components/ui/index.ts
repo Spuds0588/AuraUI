@@ -11,4 +11,5 @@ export { Badge, badgeVariants, type BadgeProps } from "./badge";
 export { default as ChoiceButtons, type ChoiceOption } from "./choice-buttons";
 export { FieldShell, Input, Label, Textarea } from "./form-controls";
 export { default as MicButton, type MicButtonProps } from "./mic-button";
+export { default as KeyHint } from "./key-hint";
 export { TONES, TONE_CLASSES, toneAt, toneClassesAt, type Tone, type ToneClasses } from "./tones";

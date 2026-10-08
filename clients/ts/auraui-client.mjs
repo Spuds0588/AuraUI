@@ -51,6 +51,11 @@ const DIFF_LINE_KINDS = new Set(["context", "add", "del"]);
 /** A RatingScale is one row of buttons, so it stops at ten points. */
 const RATING_MIN = 2;
 const RATING_MAX = 10;
+/**
+ * How many questions one `run` may carry. Mirrors `RUN_LIMIT` in the bridge, which refuses a
+ * longer one: past this a run stops being a set of questions and becomes a form.
+ */
+export const RUN_LIMIT = 12;
 /** A single task frame or event frame above this size is a bug, not a payload. */
 const MAX_FRAME_BYTES = 16 * 1024 * 1024;
 
@@ -216,6 +221,8 @@ export class Agent {
     this._reconnectAttempts = 0;
     this._reconnectTimer = null;
     this._pendingWelcome = null;
+    /** A single in-flight `answers` read, resolved by the bridge's reply. */
+    this._answersWaiter = null;
   }
 
   /* -- public state ------------------------------------------------- */
@@ -452,31 +459,141 @@ export class Agent {
       throw new AuraUIError(`Duplicate taskId "${id}" is already awaiting an answer.`);
     }
 
+    const answer = this._awaitAnswer(id, timeout);
+    try {
+      this._rawSend(
+        frameJson("task", {
+          taskId: id,
+          component,
+          instruction,
+          props,
+          urgent: urgent ? true : undefined,
+        }),
+      );
+    } catch (error) {
+      this._rejectPending(id, error);
+    }
+    return answer;
+  }
+
+  /**
+   * Ask several questions in one call, and get every answer back together.
+   *
+   * The reason this exists is how agents actually behave. An agent with four independent
+   * things to ask will fan them out as four calls, and the human then works through four
+   * cards that nothing ties together — an endless interview, with the agent's own thinking
+   * invisible between the questions. A run is that same fan-out as one request: the canvas
+   * draws each question as its own card, still one press each, but they arrive as a set ("Question
+   * 2 of 4") and this resolves once with all of them.
+   *
+   * Use it when you already know every question you need. Split back into `task()` calls at
+   * the point where question n+1 depends on the answer to question n — an adaptive interview
+   * is the thing this canvas is for, and a run of questions you will not ask is worse than
+   * asking them one at a time.
+   *
+   * @param {Array<{id: string, component: string, props: object, instruction?: string, urgent?: boolean}>} questions
+   *   One entry per question, in the order the human should be asked them. `id` is this
+   *   question's task id: it comes back on its answer, and it is what `resolve()`,
+   *   `waitFor()` and `answers()` name.
+   * @param {object} [request]
+   * @param {string} [request.runId] Groups this set in the logs; generated when omitted.
+   * @param {string} [request.instruction] One sentence for the whole set, drawn on every card.
+   * @param {number} [request.timeout] Seconds to wait *per question*. No timeout by default.
+   * @returns {Promise<{runId: string, answers: Array<object>}>} Answers in the order asked.
+   */
+  async askMany(questions, { runId, instruction, timeout } = {}) {
+    if (!Array.isArray(questions) || questions.length === 0) {
+      throw new AuraUIError("askMany() needs a non-empty array of questions.");
+    }
+    if (questions.length > RUN_LIMIT) {
+      throw new AuraUIError(
+        `askMany() carries ${questions.length} questions; a run asks at most ${RUN_LIMIT}. ` +
+          "Split it, or use one WizardForm when the questions are fields of a single thing.",
+      );
+    }
+
+    const ids = [];
+    for (const question of questions) {
+      requireString(question?.id, "question.id");
+      requireString(question?.component, "question.component");
+      if (typeof question.props !== "object" || question.props === null || Array.isArray(question.props)) {
+        throw new AuraUIError(
+          `Question "${question.id}" needs a plain props object built with the components helpers.`,
+        );
+      }
+      if (ids.includes(question.id)) {
+        throw new AuraUIError(
+          `Duplicate question id "${question.id}" in one run; each id is a task id and needs to be its own.`,
+        );
+      }
+      ids.push(question.id);
+    }
+
+    const run = runId ?? newTaskId();
+    requireString(run, "runId");
+    await this._awaitOpen();
+
+    for (const id of ids) {
+      if (this._pending.has(id)) {
+        throw new AuraUIError(`Question id "${id}" is already awaiting an answer on this client.`);
+      }
+    }
+
+    // Registered before the frame goes out, so no answer can land while a question is
+    // unknown to this client and be thrown away as an orphan.
+    const waiting = questions.map((question) => this._awaitAnswer(question.id, timeout));
+
+    try {
+      this._rawSend(
+        frameJson("run", {
+          runId: run,
+          instruction,
+          questions: questions.map((question) => ({
+            id: question.id,
+            component: question.component,
+            instruction: question.instruction,
+            props: question.props,
+            urgent: question.urgent ? true : undefined,
+          })),
+        }),
+      );
+    } catch (error) {
+      for (const id of ids) this._rejectPending(id, error);
+    }
+
+    try {
+      return { runId: run, answers: await Promise.all(waiting) };
+    } catch (error) {
+      // One question's deadline must not leave the rest registered: an answer to a question
+      // nobody is waiting for would only be logged as an orphan.
+      for (const id of ids) this._rejectPending(id, error);
+      throw error;
+    }
+  }
+
+  /**
+   * Register a wait for one task id and return the promise it settles.
+   *
+   * Shared by `task()`, `askMany()` and `waitFor()` so all three routes a question can take
+   * record the wait the same way — in particular the timer, whose message has to be true: a
+   * deadline removes the waiter, it does not withdraw the question.
+   */
+  _awaitAnswer(id, timeout) {
     return new Promise((resolve, reject) => {
       const entry = { resolve, reject, signals: [], timer: null };
       if (typeof timeout === "number" && timeout > 0) {
         entry.timer = setTimeout(() => {
           this._pending.delete(id);
-          reject(new TimeoutError(`No answer for task "${id}" within ${timeout}s.`));
+          reject(
+            new TimeoutError(
+              `No answer for task "${id}" within ${timeout}s. The question is still on ` +
+                `screen; call waitFor("${id}") or answers({ taskIds: ["${id}"] }) to collect ` +
+                "the answer if the human gave one.",
+            ),
+          );
         }, timeout * 1000);
       }
       this._pending.set(id, entry);
-
-      try {
-        this._rawSend(
-          frameJson("task", {
-            taskId: id,
-            component,
-            instruction,
-            props,
-            urgent: urgent ? true : undefined,
-          }),
-        );
-      } catch (error) {
-        clearTimeout(entry.timer);
-        this._pending.delete(id);
-        reject(error);
-      }
     });
   }
 
@@ -491,16 +608,85 @@ export class Agent {
   }
 
   /**
-   * Queue a transient toast in the AuraUI window. Does not expect a reply.
-   * @param {"info"|"success"|"warn"|"error"} level
-   * @param {string} message
-   * @returns {void}
+   * Ask the bridge for answers it kept on this session's behalf.
+   *
+   * This is the answer to the one question a blocking call cannot answer for itself: what did
+   * the human say while I was not waiting? AuraUI keeps every terminal event for a while, so
+   * an agent that hit its own deadline, or one that was restarted mid-question, can come back
+   * and collect it instead of asking the person to answer the same thing twice.
+   *
+   * @param {object} [request]
+   * @param {string[]} [request.taskIds] Only these tasks. Omitted asks for everything kept.
+   * @param {number} [request.timeout] Seconds to wait for the reply. Default 5.
+   * @returns {Promise<Array<{taskId: string, event: string, payload: object, seq: number, at: number}>>}
    */
-  notify(level, message) {
-    if (!NOTICE_LEVELS.has(level)) {
-      throw new AuraUIError(`notify level must be one of ${[...NOTICE_LEVELS].join(", ")}.`);
+  async answers({ taskIds, timeout = 5 } = {}) {
+    await this._awaitOpen();
+    if (this._answersWaiter) {
+      throw new AuraUIError("An answers() request is already in flight; await it before asking again.");
     }
-    this._rawSend(frameJson("notify", { level, message: requireString(message, "notify.message") }));
+    const ids = Array.isArray(taskIds) ? taskIds.map((id) => requireString(id, "answers.taskIds")) : undefined;
+
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this._answersWaiter = null;
+        reject(new TimeoutError(`AuraUI did not answer the answers request within ${timeout}s.`));
+      }, timeout * 1000);
+
+      this._answersWaiter = {
+        resolve: (items) => {
+          clearTimeout(timer);
+          this._answersWaiter = null;
+          resolve(items);
+        },
+        reject: (error) => {
+          clearTimeout(timer);
+          this._answersWaiter = null;
+          reject(error);
+        },
+      };
+
+      try {
+        this._rawSend(frameJson("answers", { taskIds: ids }));
+      } catch (error) {
+        clearTimeout(timer);
+        this._answersWaiter = null;
+        reject(error);
+      }
+    });
+  }
+
+  /**
+   * Keep waiting on a question this call did not wait for.
+   *
+   * The second half of the deadline story. If the bridge already holds the answer — because
+   * the human answered after a `task()` gave up, or because another agent asked — this
+   * resolves immediately from what was kept. Otherwise it watches the socket for the terminal
+   * event, exactly as `task()` would have.
+   *
+   * This is what an agent does instead of "putting itself to sleep": it hands the wait back
+   * to the framework, which is already holding a socket open for it.
+   *
+   * @param {string} taskId
+   * @param {object} [request]
+   * @param {number} [request.timeout] Seconds to wait. No timeout by default.
+   * @returns {Promise<{taskId: string, event: string, payload: object, seq: number, at: number}>}
+   */
+  async waitFor(taskId, { timeout } = {}) {
+    const id = requireString(taskId, "waitFor.taskId");
+    await this._awaitOpen();
+
+    const kept = await this.answers({ taskIds: [id] });
+    const found = kept.find((item) => item.taskId === id);
+    if (found) {
+      return { taskId: found.taskId, event: found.event, payload: found.payload ?? {}, seq: found.seq, at: found.at };
+    }
+
+    if (this._pending.has(id)) {
+      throw new AuraUIError(`Task "${id}" is already being waited on by this client.`);
+    }
+
+    return this._awaitAnswer(id, timeout);
   }
 
   /**
@@ -571,6 +757,27 @@ export class Agent {
       case "ack":
         this._emit("ack", message);
         return;
+
+      case "progress":
+        // A check-in on a question nobody has answered yet: how long it has been, whether the
+        // human has touched it, and whatever they have said on it so far.
+        this._emit("progress", {
+          taskId: message.taskId,
+          state: message.state,
+          elapsedMs: message.elapsedMs,
+          estimatedMs: message.estimatedMs,
+          remainingMs: message.remainingMs,
+          signals: message.signals ?? [],
+          at: message.at,
+        });
+        return;
+
+      case "answers": {
+        const items = Array.isArray(message.items) ? message.items : [];
+        this._emit("answers", items);
+        this._answersWaiter?.resolve(items);
+        return;
+      }
 
       case "error": {
         const error = new ProtocolError(message.code ?? "bad_frame", message.message ?? "unknown error");
@@ -645,6 +852,12 @@ export class Agent {
   _rejectAllPending(error) {
     const ids = Array.from(this._pending.keys());
     for (const id of ids) this._rejectPending(id, error);
+    // An `answers` read is waiting on the same socket, so it dies with it. Failing rather
+    // than answering "nothing kept": an empty list would read as "the human said nothing",
+    // and what it actually means is that we could not ask. Anything the bridge already holds
+    // survives, so the caller can simply ask again.
+    this._answersWaiter?.reject(error);
+    this._answersWaiter = null;
   }
 
   /**

@@ -57,8 +57,16 @@ export default {
        * (`card-out-down`) — that is the difference between "next question" and "all done".
        * The first card has nothing to hand off from, so it just rises (`fade-up`).
        *
-       * Durations are a deliberate beat longer than a snappy UI would use, so the movement is
-       * legible rather than subliminal. App.tsx holds an exiting card for `CARD_MS` to match.
+       * Durations are deliberately slow — around a second, where a snappy UI would use 150ms.
+       * This canvas appears over whatever someone was already doing, uninvited, so its motion
+       * has to read as something settling into place rather than something snapping at them.
+       * A hand-off between two questions is the common case, not the rare one: an agent asks
+       * several things in a row, so the motion people actually see is this one, over and over.
+       * Half a second read as a flicker there; a second reads as a card being moved aside.
+       *
+       * The same reasoning applies to the dim layer, which fades rather than cutting, and to
+       * App.tsx, which holds a card on screen for `CARD_MS` — that constant must stay at or
+       * above the longest `card-out-*` duration or the card is unmounted mid-flight.
        */
       keyframes: {
         "fade-up": {
@@ -83,10 +91,10 @@ export default {
         },
       },
       animation: {
-        "fade-up": "fade-up 0.32s ease-out",
-        "card-in-right": "card-in-right 0.32s ease-out",
-        "card-out-left": "card-out-left 0.32s ease-in forwards",
-        "card-out-down": "card-out-down 0.32s ease-in forwards",
+        "fade-up": "fade-up 0.9s cubic-bezier(0.22, 1, 0.36, 1)",
+        "card-in-right": "card-in-right 1s cubic-bezier(0.22, 1, 0.36, 1)",
+        "card-out-left": "card-out-left 0.9s ease-in forwards",
+        "card-out-down": "card-out-down 0.9s ease-in forwards",
         "pulse-ring": "pulse-ring 1.8s ease-in-out infinite",
       },
     },

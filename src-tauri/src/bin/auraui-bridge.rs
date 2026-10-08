@@ -170,9 +170,6 @@ impl UiSink for StdoutSink {
                     resolve.reason.as_deref().unwrap_or("")
                 );
             }
-            AgentFrame::Notify(notify) => {
-                println!("[notify] {:?} {}", notify.level, notify.message);
-            }
             AgentFrame::Note(note) => {
                 println!("[note] {}", note.text);
             }
@@ -181,6 +178,13 @@ impl UiSink for StdoutSink {
             }
             // Answered with a `pong` by the bridge itself; nothing to show.
             AgentFrame::Ping(_) => {}
+            // Answered with the retained answers by the bridge itself. Printing it here would
+            // be a copy of what the asking agent already receives.
+            AgentFrame::Answers(_) => {}
+            // Expanded into one `task` per question before it reaches any surface, so this
+            // sink only ever sees the individual questions. Left silent rather than printing
+            // twice.
+            AgentFrame::Run(_) => {}
         }
 
         // A terminal printing every frame is a real human-facing surface.

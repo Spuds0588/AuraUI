@@ -72,6 +72,86 @@ agent.on("event", (answer) => console.log("any event:", answer.event));
 was lost; `agent.seqGaps` counts them and `agent.on("gap", ...)` reports each one. Frames
 for a task you are not waiting on fire `orphan` and a console warning rather than throwing.
 
+## Asking several questions at once
+
+An agent with four independent things to ask will fan them out as four calls, and the human
+then works through four cards that nothing ties together. `askMany()` is the same fan-out as
+one request: each question is still its own card, answered with one press, but the set arrives
+as a run and one promise resolves with all of them.
+
+```js
+const { answers } = await agent.askMany(
+  [
+    { id: "suspect", component: "ActionCard",
+      instruction: "Does 9f3c1a02 match what you know?",
+      props: c.actionCard([c.option("yes", "That is the one"), c.option("no", "Not it")]) },
+    { id: "timing", component: "RatingScale",
+      instruction: "How much warning did you have?",
+      props: c.ratingScale({ min: 1, max: 4, labels: ["None", "Minutes", "An hour", "All day"] }) },
+  ],
+  { instruction: "Neither of these depends on the other, so I asked both at once." },
+);
+
+answers[0].taskId;      // "suspect" — the id you gave it is the task id
+answers[1].payload;     // { value: 3, label: "An hour", min: 1, max: 4 }
+```
+
+A card in a run says "Question 2 of 4", and the line under it counts what is left in the set
+separately from anything else you have queued. Ask this way when you already know every
+question you need; split back into `task()` calls at the point where question n+1 depends on
+the answer to question n, because that interview is the thing this canvas is for.
+
+A run must be well-formed before any card is drawn — ids present and unique, components known,
+props valid — and at most twelve questions (`RUN_LIMIT`). A refusal names the question at fault
+in `taskId` and draws nothing. `waitFor(id)` and `answers({ taskIds: [id] })` work on a run's
+questions exactly as they do on a lone task, so a run that outlives your patience is still
+collectable.
+
+## Waiting on a person
+
+`task()` blocks, which is what a tool call does, and that is usually the right shape. What a
+tool call does not normally have to survive is a *human* delay, so three things exist for it.
+
+**The ack confirms the call and quotes the wait.** Every `task` is acked in milliseconds, and
+that ack carries `wait`: `{ estimatedMs, pollIntervalMs, expiresAt }`. `estimatedMs` is how
+long an answer usually takes, and nothing times a question out — past `expiresAt` the card is
+still up and the check-ins keep coming.
+
+**`progress` says whether anyone is answering.** On the quoted interval, and immediately
+whenever the human touches the card:
+
+```js
+agent.on("progress", (frame) => {
+  // { taskId, state: "waiting" | "answering", elapsedMs, estimatedMs, remainingMs, signals }
+  console.log(frame.state, frame.remainingMs, frame.signals);
+});
+```
+
+`state: "answering"` means somebody is there and mid-answer; `signals` carries their partial
+moves (a highlighted row, a half-filled form) newest first, so you can act on an answer before
+it is finished. A long run of `waiting` is the only evidence available that nobody is at the
+desk.
+
+**A deadline is not a withdrawal.** If `task({ timeout })` gives up, the card stays on screen
+and the bridge keeps the answer. Come back for it instead of re-asking the person:
+
+```js
+// Resolves from what the bridge kept, or watches the socket exactly as task() would have.
+const answer = await agent.waitFor("task_9f3c1a02");
+
+// One-shot read: every answer the bridge still holds, or just these tasks.
+const kept = await agent.answers({ taskIds: ["task_9f3c1a02"] });
+```
+
+The bridge keeps terminal events for ten minutes (the last 64), so this also covers an agent
+restarted mid-question, or a host resuming a turn the human answered during. `seq` on a
+retained answer is the same number the live event carried.
+
+Note the shape of the answer to "can the answer be pushed back into the agent?": not into the
+model's context, no. Something has to ask — `waitFor`, `answers`, a re-sent `task`, or a host
+that re-invokes the tool (which is what MCP's Multi Round-Trip Requests and experimental Tasks
+are for). `docs/PROTOCOL.md` §8 covers both protocols side by side.
+
 ## API
 
 | Member | Purpose |
@@ -79,17 +159,20 @@ for a task you are not waiting on fire `orphan` and a console warning rather tha
 | `new Agent({ name, version?, vendor?, capabilities?, url?, reconnect? })` | `url` defaults to `ws://127.0.0.1:9090`. |
 | `connect(timeoutMs?)` | Opens the socket, sends `hello`, resolves with `welcome`. Default 10s. |
 | `task({ component, props, taskId?, instruction?, urgent?, timeout? })` | Summons a component and resolves with the answer. `timeout` is in seconds. |
+| `askMany(questions, { runId?, instruction?, timeout? })` | One request carrying several questions; resolves with `{ runId, answers }` in the order asked. |
 | `resolve(taskId, reason?)` | Withdraws a task before the human answers. |
+| `waitFor(taskId, { timeout? })` | Keeps waiting on a question this call did not wait for. Resolves from a retained answer when there is one. |
+| `answers({ taskIds?, timeout? })` | Reads the answers the bridge kept: what the human said while nobody was waiting. |
 | `update(taskId, { props?, instruction? })` | Patches a live task, e.g. to feed a chart drill-down. |
-| `notify(level, message)` | `info` \| `success` \| `warn` \| `error`. A transient toast. |
 | `note(text, kind?)` | `thinking` \| `progress` \| `result` \| `meta`. One line of narration, shown while the canvas is idle. |
 | `ping()` | Liveness probe; AuraUI answers with `pong`. |
 | `close()` | Closes the socket and rejects anything in flight. Idempotent. |
 | `on(event, handler)` / `off` | Returns an unsubscribe function. |
 | `connected`, `sessionId`, `server`, `pendingTaskIds`, `seqGaps` | Read-only state. |
 
-Client events: `welcome`, `event`, `signal`, `answered`, `ack`, `error`, `close`,
-`reconnecting`, `reconnect`, `reconnect_failed`, `gap`, `orphan`, `pong`, `handler_error`.
+Client events: `welcome`, `event`, `signal`, `answered`, `ack`, `progress`, `answers`, `error`,
+`close`, `reconnecting`, `reconnect`, `reconnect_failed`, `gap`, `orphan`, `pong`,
+`handler_error`.
 
 ## Prop builders
 
@@ -196,7 +279,6 @@ One JSON object per WebSocket text message, protocol version `1.0`.
 | `task` | `taskId, component, props, instruction?, urgent?` |
 | `update` | `taskId, props?, instruction?` |
 | `resolve` | `taskId, reason?` |
-| `notify` | `level, message` |
 | `note` | `text, kind?` |
 | `ping` | — |
 

@@ -66,12 +66,15 @@ who is mid-answer.
 
 Four consequences worth designing around:
 
-- **Do not fan out.** Sending six unrelated tasks at once does not show six cards; it shows
-  one and makes the human work through a queue. Prefer one question that decides the next.
+- **Group what you already know; split what depends on itself.** An agent with four
+  independent things to ask should send them as one `run`, not four `task` frames: the same
+  set then reads as one ask ("Question 2 of 4") and comes back as one result. Questions that
+  depend on earlier answers stay separate calls. That interview is what this canvas is for,
+  and a run of questions you would not have asked is worse than asking them one at a time.
 - **Queue depth is legible.** The canvas draws a single quiet line under the card saying how
   many questions are waiting, so the human knows whether they are nearly done.
-- **`note` and `notify` are not queued.** Narration is narration; a `notify` shows as a toast
-  without pushing anything into the queue.
+- **`note` is not queued.** Narration is narration, and it never pushes anything into the
+  queue.
 - **One press finishes a question.** A choice, a row in a single-select grid, a point on a
   scale and a hunk decision are all sent by the press that makes them. Only a question that
   needs words — a field to type in, a set to assemble, a list to order — asks for a button
@@ -110,6 +113,40 @@ Only `agent.name` is required.
 | `instruction` | no | One or two sentences aimed at the human, drawn above the card. |
 | `urgent` | no | Adds an accent border and a "needs you" chip. Not colour alone. |
 
+### `run` — ask several questions in one call
+
+```json
+{ "v": "1.0", "type": "run", "runId": "incident",
+  "instruction": "Two things about the incident.",
+  "questions": [
+    { "id": "area", "component": "ActionCard", "instruction": "Where did it break?",
+      "props": { "options": [ { "id": "checkout", "label": "Checkout" } ] } },
+    { "id": "severity", "component": "RatingScale", "props": { "max": 5 } }
+  ] }
+```
+
+| Field | Required | Notes |
+| --- | --- | --- |
+| `runId` | yes | Non-empty. Groups the questions in the log and on the card. |
+| `instruction` | no | One sentence for the whole set, drawn on every card of it. |
+| `questions` | yes | One to twelve questions, in the order the human should be asked them. |
+
+Each question is `{ id, component, props, instruction?, urgent? }`. **`id` is that question's
+task id**: the answer arrives on it, carrying that `taskId`, and it is what `resolve`,
+`waitFor` and `answers` name.
+
+The bridge expands a run before anything reaches the canvas, so a question inside a run is an
+ordinary task in every other respect — same `ack` with the same `wait` plan, same `event`,
+same `progress` check-ins, same retention in `answers`. The one addition is a `run` block on
+the task frame, `{ runId, index, total, instruction? }`, which is what lets the card say
+"Question 2 of 4" and lets the line under it count what is left in the set rather than lumping
+it in with everything else queued.
+
+A run is validated as a whole and refused as a whole: one bad question means **no** card is
+drawn at all, and the `error` names the question at fault in `taskId`. One question per card is
+still what the human sees — a run changes how many questions arrive at once, never how they
+are answered.
+
 ### `update` — change a card in place
 
 ```json
@@ -131,15 +168,6 @@ and leave `vegaSchema` alone.
 Use this after receiving a non-terminal event (`select`, `sort`, `change`) when a selection
 *is* the answer. A card the agent withdrew must not still be on screen.
 
-### `notify` — transient toast
-
-```json
-{ "v": "1.0", "type": "notify", "level": "warn", "message": "Staging is locked for 10 min." }
-```
-
-`level` is `info | success | warn | error`. Toasts replace each other; never send an answer
-through a toast.
-
 ### `note` — a line of narration
 
 ```json
@@ -148,6 +176,13 @@ through a toast.
 
 `kind` is `thinking | progress | result | meta` (default `meta`). This is the cheap channel:
 no answer is expected, and it is what makes a long-running agent legible while it works.
+
+**This is the only way an agent says something without asking something.** A `notify` frame
+once floated a toast in the corner of the human's screen; it is gone, and a frame with
+`"type": "notify"` now comes back as `unknown_type`. It was removed because it duplicated this
+badly: a toast is chrome parked over someone else's work, it cannot be re-read once it has
+faded, and it says nothing a line of narration does not say better, in the place the human is
+already looking.
 
 The canvas renders **only the newest note, and only while it is at rest** — one quiet line
 where the status text would otherwise sit. Notes never stack and never get a row of their own,
@@ -169,7 +204,8 @@ Answered with a targeted `pong`. The transport's own ping/pong is also handled.
 ### `ack` — did anyone actually see it?
 
 ```json
-{ "v": "1.0", "type": "ack", "taskId": "triage", "status": "rendered" }
+{ "v": "1.0", "type": "ack", "taskId": "triage", "status": "rendered",
+  "wait": { "estimatedMs": 90000, "pollIntervalMs": 5000, "expiresAt": 1775487021482 } }
 ```
 
 | Status | Meaning | What to do |
@@ -190,6 +226,74 @@ frame. It is `queued` only when there is genuinely no canvas to draw it.
 
 Acks are sent for `task`, `update` and `resolve`. They arrive **before** the human's `event`,
 because understanding is not answering.
+
+`wait` rides on the ack for a `task` and nothing else, because that is the one frame an agent
+is expected to block on. It is the confirmation half of asking a person anything: the question
+is up, an answer usually takes about this long, and here is how often the canvas will check in
+the meantime.
+
+**Nothing here times a question out.** `expiresAt` is `estimatedMs` after the ack was stamped,
+and the human is under no obligation to answer before it. Past that point the card is still on
+screen, the check-ins keep coming, and it is up to the agent to decide what a long silence
+means. Set `AURAUI_WAIT_ESTIMATE_MS` on the bridge to change the estimate.
+
+### `progress` — still waiting, and here is what they have picked so far
+
+```json
+{ "v": "1.0", "type": "progress", "taskId": "triage", "state": "answering",
+  "elapsedMs": 12750, "estimatedMs": 90000, "remainingMs": 77250,
+  "signals": [ { "event": "select", "payload": { "rowIds": ["smoke-8843"] },
+                 "at": 1775486944231 } ],
+  "at": 1775486944231 }
+```
+
+Sent on the interval the ack quoted while a question is unanswered, and immediately whenever
+the human does something on the card.
+
+| `state` | Meaning |
+| --- | --- |
+| `waiting` | The card is up and nobody has touched it. |
+| `answering` | The human has started. |
+
+That distinction is the whole reason these frames exist: from the outside, a person reading a
+question and a person who left the room look exactly alike, and an agent blocked on a person
+has no way to tell them apart on its own.
+
+`signals` carries the **non-terminal** events the human has produced on this card — a
+highlighted row, a half-filled form, one hunk already decided — newest first. They are the
+same events the agent already receives as `event` frames; carrying a copy here is what makes a
+partial answer and the fact that it is being given arrive together, rather than as two
+unrelated things on two schedules.
+
+`remainingMs` saturates at zero. A wait that outlasts the estimate keeps reporting; there is
+no frame that says "give up".
+
+### `answers` — what was said while you were not waiting
+
+An agent asks:
+
+```json
+{ "v": "1.0", "type": "answers", "taskIds": ["triage"] }
+```
+
+Omit `taskIds` to ask for everything the bridge still holds. It is answered to the asking agent
+alone, unlike an `ack`, which every agent sees:
+
+```json
+{ "v": "1.0", "type": "answers", "items": [
+  { "taskId": "triage", "event": "action", "payload": { "actionId": "investigate" },
+    "seq": 1, "at": 1775486931482 } ] }
+```
+
+The bridge keeps every terminal event for **ten minutes**, newest first, up to **64** of them,
+and an answer for a task replaces any earlier answer for that same task rather than stacking.
+`seq` is the number the live event carried, so a replayed answer and a seen one are the same
+event and an agent can tell that it already handled it.
+
+This is the one thing a blocking call cannot answer for itself. A tool call that gave up, an
+agent that was restarted mid-question, a host that resumed a turn the human answered during —
+none of them can learn what the person said, and all of them can ask here instead of asking the
+person to answer twice.
 
 ### `event` — the human answered
 
@@ -610,9 +714,11 @@ not pretend otherwise:
   land on a socket that is closed.
 - The card says so, in a line in its own place: *"The agent disconnected before you answered,
   so this question is no longer answerable. It closes in N seconds."*
-- After a **six second** grace period the question is dropped and a toast records why. The
-  grace exists so a bridge restart, or an agent that reconnects immediately, does not throw
-  away a question the human was mid-way through answering.
+- After a **six second** grace period the question is dropped, leaving the screen the way
+  every other card leaves it. Nothing is announced anywhere else: the countdown above was the
+  explanation, and a badge in the corner about a card you watched leave is chrome for nothing.
+  The grace exists so a bridge restart, or an agent that reconnects immediately, does not
+  throw away a question the human was mid-way through answering.
 - If an agent reconnects inside the grace period, the question becomes answerable again.
 
 There is no frame for any of this on the wire, because the agent is not there to read one.
@@ -621,7 +727,75 @@ disconnected is gone, and nobody will tell you.** An agent that reconnects and s
 the answer has to send the task again. Re-sending the same `taskId` is safe — it replaces the
 old card rather than stacking a second one.
 
-## 8. Running the bridge
+## 8. Waiting for a person
+
+A question is not a tool call, and the difference is the human. Everything in this section
+exists because of that one fact: a tool call that blocks for five seconds is behaving, and a
+question that stays unanswered for five minutes is normal.
+
+The whole story is four frames.
+
+1. **`task` in, `ack` + `wait` out.** The call is confirmed in milliseconds, with how long an
+   answer usually takes and how often the canvas will check in. An agent knows immediately
+   whether a human is even looking (`queued` means nobody is).
+2. **`progress` while the card is up.** On the quoted interval, plus immediately whenever the
+   human touches the card, with the partial answer attached.
+3. **`event` when it lands** — the blocking half, resolved by the turning of the wait.
+4. **`answers` if the agent was not there for it.** The bridge keeps terminal events, so an
+   agent that stopped waiting can collect the answer later without re-asking the person.
+
+### What this means for an agent
+
+- **Waiting is normal, and the socket holds the wait for you.** `task()` blocks in the
+  client; an agent that prefers not to block on the call can end its turn and come back with
+  `waitFor(taskId)`, which resolves from what the bridge kept if the answer already landed.
+- **A deadline is not a withdrawal.** If a task times out, the card is still on screen and the
+  answer is still collectable. Withdrawing on a deadline would throw away work the human may
+  be halfway through.
+- **Use `progress` to decide whether to keep waiting.** `answering` means keep waiting —
+  somebody is there and mid-answer. A long run of `waiting` is the only evidence available
+  that nobody is at the desk.
+- **Do not poll `answers` in a tight loop.** It is for catching up after a turn of your own,
+  not for waiting. The live `event` and `progress` frames are the waiting.
+
+### How this compares to MCP
+
+Read this before designing a host around AuraUI, because the two protocols are aimed at the
+same problem.
+
+- **Progress notifications.** MCP has `notifications/progress`, keyed by a `progressToken` the
+  caller passes. AuraUI's `progress` does the same job, with the human's own words in it:
+  `signals` carries what they have picked so far, which is more than a generic percentage can
+  ever carry.
+- **Tasks.** Introduced in MCP `2025-11-25` and still marked experimental: a request can be
+  augmented with a task, the receiver immediately returns a handle (`taskId`, `status`,
+  `pollInterval`, `ttl`) instead of the result, and the requestor polls `tasks/get` and
+  retrieves the outcome with `tasks/result`, which blocks until terminal. Statuses are
+  `working`, `input_required`, `completed`, `failed`, `cancelled`. That is AuraUI's `ack` +
+  `wait` + `answers` in MCP's vocabulary. MCP's `CreateTaskResult` may also carry
+  `io.modelcontextprotocol/model-immediate-response` in `_meta` — a string the host passes to
+  the model *as an immediate tool result* while the task runs. That is the closest thing in
+  the standard to "confirm now, answer later", and it is host-side and provisional.
+- **Multi Round-Trip Requests** (MCP `2026-07-28`). A tool call can end its HTTP response with
+  `resultType: "input_required"`, `inputRequests` (a form elicitation with a JSON Schema) and
+  an opaque `requestState`. The client collects the answers and **re-issues the same tool
+  call** with `inputResponses` and the echoed `requestState`. A server may only solicit input
+  while it is handling a request it was sent, so nothing pops a dialog at a person
+  spontaneously.
+
+**The question this all leads to, and the honest answer:** there is still no standard way for
+a server to push text *into* a model's context. Every mechanism above works because the
+**host** re-invokes the tool, or the agent asks again — the answer travels back as a tool
+result on a call the client made, never as unsolicited prompt text. A local bridge like this
+one could hand an answer to a host that knows how to write into a running turn, but that is a
+host feature, not a protocol feature, and no MCP revision has made it standard.
+
+So AuraUI does both halves on purpose. The **live half**: an agent that is waiting is streamed
+the answer and the progress. The **off-line half**: an agent that stopped waiting asks again
+and collects what the person said meanwhile. The second half is why the bridge keeps an answer
+instead of dropping it when the socket that asked has gone.
+
+## 9. Running the bridge
 
 | Way | Command |
 | --- | --- |

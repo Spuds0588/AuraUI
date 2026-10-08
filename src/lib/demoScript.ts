@@ -388,32 +388,49 @@ export function demoOpening(): DemoFrame[] {
         },
       }),
     },
-    // A second question while the first is still unanswered. Real agents do this whenever
-    // they find something else on the way, and it is the case the canvas has to get right:
-    // one question on screen, the rest visibly waiting their turn.
+    // Two questions the agent already knows it needs, asked in one call. This is the other
+    // half of the queue story: a *run* is one request carrying several questions, so nothing
+    // depends on the answer to the other one, and the human is told they are two questions
+    // rather than being handed an interview one question at a time.
     {
       delay: 1200,
       frame: frame("note", {
-        text: "While you decide: I pulled the change that landed just before the first failure.",
+        text: "Two things I need from you while you decide. Asking them together.",
         kind: "progress",
       }),
     },
     {
       delay: 400,
-      frame: frame("task", {
-        taskId: "suspect",
-        component: "ActionCard",
-        instruction:
-          "Suspect: 9f3c1a02 (cart reducer) landed four minutes before the first failure. Does that match what you know?",
-        props: {
-          columns: 2,
-          footnote: "You can answer this one later; it stays queued.",
-          options: [
-            { id: "yes", label: "That is the one", variant: "primary" },
-            { id: "no", label: "Not it" },
-            { id: "unsure", label: "Not sure", variant: "ghost" },
-          ],
-        },
+      frame: frame("run", {
+        runId: "triage-details",
+        instruction: "Neither of these depends on the other, so I asked both at once.",
+        questions: [
+          {
+            id: "suspect",
+            component: "ActionCard",
+            instruction:
+              "Suspect: 9f3c1a02 (cart reducer) landed four minutes before the first failure. Does that match what you know?",
+            props: {
+              columns: 2,
+              options: [
+                { id: "yes", label: "That is the one", variant: "primary" },
+                { id: "no", label: "Not it" },
+                { id: "unsure", label: "Not sure", variant: "ghost" },
+              ],
+            },
+          },
+          {
+            id: "timing",
+            component: "RatingScale",
+            instruction: "How much warning did you have before it hit staging?",
+            props: {
+              min: 1,
+              max: 4,
+              legend: { low: "None at all", high: "Plenty" },
+              labels: ["None", "Minutes", "An hour", "All day"],
+            },
+          },
+        ],
       }),
     },
   ];
@@ -468,9 +485,9 @@ export function demoReply(
           { delay: 300, frame: frame("note", { text: "Rolling staging back to 2.14.2.", kind: "progress" }) },
           {
             delay: 700,
-            frame: frame("notify", {
-              level: "success",
-              message: "Staging is back on 2.14.2. 2.14.3 is parked for inspection.",
+            frame: frame("note", {
+              text: "Staging is back on 2.14.2. 2.14.3 is parked for inspection.",
+              kind: "result",
             }),
           },
           {
@@ -501,7 +518,7 @@ export function demoReply(
         return [
           {
             delay: 300,
-            frame: frame("notify", { level: "info", message: "Recorded: 2.14.3 flakiness is expected." }),
+            frame: frame("note", { text: "Recorded: 2.14.3 flakiness is expected.", kind: "result" }),
           },
           {
             delay: 400,
@@ -553,6 +570,22 @@ export function demoReply(
       ];
     }
 
+    // The other question of that run. It was asked in the same breath as "suspect" and the
+    // human may answer it first, so its reply cannot depend on the other one having landed.
+    case "timing": {
+      if (event !== "submit") return [];
+      const point = Number(p.value ?? 0);
+      return [
+        {
+          delay: 250,
+          frame: frame("note", {
+            text: `Noted: ${point} of 4 on warning time. Both answers are recorded.`,
+            kind: "meta",
+          }),
+        },
+      ];
+    }
+
     case "anomaly": {
       if (event !== "submit" && event !== "select") return [];
       const rowIds = Array.isArray(p.rowIds) ? (p.rowIds as string[]) : [];
@@ -560,7 +593,10 @@ export function demoReply(
         return [
           {
             delay: 200,
-            frame: frame("notify", { level: "warn", message: "Select a run first, then submit." }),
+            frame: frame("note", {
+              text: "Nothing to bisect yet — press the row you mean when you are ready.",
+              kind: "meta",
+            }),
           },
         ];
       }

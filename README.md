@@ -19,7 +19,9 @@ AuraUI is not a window you keep open, and not a chat log. It is an overlay:
 - A question **fades up over the whole desktop**, dimming what you were looking at but
   leaving it visible, and the card is the only thing asking for your attention.
 - **One question at a time.** Everything else the agent asks waits in a queue, shown as a
-  single quiet line, and is answered in the order it was asked.
+  single quiet line, and is answered in the order it was asked. Questions the agent already
+  knew it needed arrive as one `run`, so four cards read as one ask — "Question 2 of 4" —
+  while each is still answered by a single press.
 - **One press answers it.** A choice, a row in a table, a point on a scale and an
   accept-or-reject on a diff are all sent by the press that makes them. Only a question that
   genuinely needs words keeps a button, because only you know when you have finished typing.
@@ -59,8 +61,8 @@ And choosing is *one* button. The press that makes a choice is the answer — `A
 `DiffReview` all send themselves on that press. A button asking you to confirm the thing you
 just clicked turns one decision into two, so there is not one.
 
-Plus `note` for narration, `notify` for toasts, and `ack` so an agent always knows whether a
-window is actually showing its question (`rendered`) or nobody is looking (`queued`).
+Plus `note` for narration and `ack` so an agent always knows whether a window is actually
+showing its question (`rendered`) or nobody is looking (`queued`).
 
 ### Answering out loud
 
@@ -139,6 +141,12 @@ with Agent("release-wrangler") as agent:
     )
     print(answer["payload"]["actionId"])   # "investigate"
 ```
+
+`task()` blocks, which is what a tool call does. What it also has to survive is a person: the
+ack quotes how long an answer usually takes, `progress` frames say whether anyone has touched
+the card and carry their partial answer as they make it, and an answer the bridge kept is still
+collectable after a deadline has passed (`wait_for`, `answers`). `docs/PROTOCOL.md` §8 explains
+the model, alongside how MCP's Tasks and Multi Round-Trip Requests solve the same problem.
 
 Node, zero required dependencies:
 

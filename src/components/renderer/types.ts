@@ -36,7 +36,7 @@ export type TaskComponent = ComponentType<TaskComponentProps<never>>;
 /** Registry entry: how to draw a component and how to describe it. */
 export interface TaskRenderer {
   component: TaskComponent;
-  /** Short label for the card header chip and toasts. */
+  /** Short label for the card header chip. */
   label: string;
   /** One-line hint shown when a task is the only thing on the canvas. */
   hint?: string;

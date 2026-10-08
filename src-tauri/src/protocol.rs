@@ -53,6 +53,156 @@ pub struct TaskFrame {
     pub props: Value,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub urgent: bool,
+    /// Set when this question was asked as part of one `run`.
+    ///
+    /// A run is not a component and not a card: it is a *request* that carried several
+    /// questions. The bridge expands it here, so everything downstream — acks, events,
+    /// retention, the queue — treats each question exactly like a lone one. The only thing
+    /// this adds is enough context for the human to see that they are in the middle of a set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<RunSlot>,
+}
+
+/// Where one question sits inside the run that asked it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RunSlot {
+    #[serde(rename = "runId")]
+    pub run_id: String,
+    /// Zero-based.
+    pub index: usize,
+    pub total: usize,
+    /// The run's own sentence, repeated on every card of the run: somebody who sits down at
+    /// question three still has to know what the set of questions is for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instruction: Option<String>,
+}
+
+/// One question inside a `run`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RunQuestion {
+    /// Becomes this question's task id, so acks, events, `progress` and retained answers all
+    /// key off it exactly as they do for a lone task.
+    pub id: String,
+    pub component: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instruction: Option<String>,
+    pub props: Value,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub urgent: bool,
+}
+
+/// Several questions asked in one call.
+///
+/// This exists because of how agents actually behave: an agent with four independent things
+/// to ask will fan them out as four calls, and the human then works through four cards that
+/// nothing ties together. A run makes that same fan-out one request with one result, while
+/// keeping the thing this canvas is built on — one card, one question, one press.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RunFrame {
+    #[serde(default = "protocol_version")]
+    pub v: String,
+    #[serde(rename = "runId")]
+    pub run_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instruction: Option<String>,
+    pub questions: Vec<RunQuestion>,
+}
+
+/// How many questions one run may carry.
+///
+/// A run longer than this is not a set of questions, it is a form the human did not agree to
+/// fill in. The cap is deliberately low enough to keep the run's shape visible on screen.
+pub const RUN_LIMIT: usize = 12;
+
+/// A run the bridge refused, and which question it refused.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RunError {
+    /// The offending question's id, when the fault is one question's rather than the run's.
+    /// Travels as the error frame's `taskId`, so an agent can blame the right question.
+    pub question_id: Option<String>,
+    pub message: String,
+}
+
+/// Check a run and turn it into the questions the rest of the bridge already understands.
+///
+/// One function rather than two so a question cannot be validated by one path and delivered
+/// by another: what passes here is exactly what goes on screen. Order is preserved, because
+/// the canvas answers first asked first answered and a run is asked in the order it was
+/// written.
+pub fn expand_run(frame: &RunFrame) -> Result<Vec<TaskFrame>, RunError> {
+    let refuse = |question_id: Option<&str>, message: String| RunError {
+        question_id: question_id.map(str::to_string),
+        message,
+    };
+
+    let run_id = frame.run_id.trim();
+    if run_id.is_empty() {
+        return Err(refuse(None, "`runId` must be a non-empty string.".into()));
+    }
+    if frame.questions.is_empty() {
+        return Err(refuse(None, "`questions` is empty: there is nothing to ask.".into()));
+    }
+    if frame.questions.len() > RUN_LIMIT {
+        return Err(refuse(
+            None,
+            format!(
+                "`questions` carries {} questions; a run asks at most {RUN_LIMIT}. Split it, or \
+                 use a WizardForm when the questions are fields of one thing.",
+                frame.questions.len()
+            ),
+        ));
+    }
+
+    let total = frame.questions.len();
+    let mut seen: Vec<&str> = Vec::with_capacity(total);
+    let mut tasks = Vec::with_capacity(total);
+
+    for (index, question) in frame.questions.iter().enumerate() {
+        let id = question.id.trim();
+        if id.is_empty() {
+            return Err(refuse(None, format!("`questions[{index}].id` must be non-empty.")));
+        }
+        if seen.contains(&id) {
+            return Err(refuse(
+                Some(id),
+                format!("`questions[{index}].id` repeats {id:?}; every question in a run needs its own id, because the id is the task id its answer comes back on."),
+            ));
+        }
+        seen.push(id);
+
+        if !is_known_component(&question.component) {
+            return Err(refuse(
+                Some(id),
+                format!(
+                    "Unknown component {:?} on question {id:?}. Supported: {}.",
+                    question.component,
+                    COMPONENT_NAMES.join(", ")
+                ),
+            ));
+        }
+        if let Err(message) = validate_props(&question.component, &question.props) {
+            return Err(refuse(Some(id), message));
+        }
+
+        tasks.push(TaskFrame {
+            // Stamped by the bridge, like every other outbound `v`: the questions in a run do
+            // not each carry their own version, because the run was accepted as one frame.
+            v: PROTOCOL_VERSION.to_string(),
+            task_id: id.to_string(),
+            component: question.component.clone(),
+            instruction: question.instruction.clone(),
+            props: question.props.clone(),
+            urgent: question.urgent,
+            run: Some(RunSlot {
+                run_id: run_id.to_string(),
+                index,
+                total,
+                instruction: frame.instruction.clone(),
+            }),
+        });
+    }
+
+    Ok(tasks)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -75,23 +225,6 @@ pub struct ResolveFrame {
     pub task_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum NoticeLevel {
-    Info,
-    Success,
-    Warn,
-    Error,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct NotifyFrame {
-    #[serde(default = "protocol_version")]
-    pub v: String,
-    pub level: NoticeLevel,
-    pub message: String,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -132,9 +265,10 @@ pub enum AgentFrame {
     Task(TaskFrame),
     Update(UpdateFrame),
     Resolve(ResolveFrame),
-    Notify(NotifyFrame),
     Note(NoteFrame),
     Ping(PingFrame),
+    Answers(AnswersRequest),
+    Run(RunFrame),
 }
 
 /* ------------------------------------------------------------------ *
@@ -159,6 +293,39 @@ pub struct WelcomeFrame {
     pub server: ServerInfo,
 }
 
+/// What an agent should expect while a question is in front of a person.
+///
+/// AuraUI's guarantee is weaker than a tool call's and it is better to say so: nothing here
+/// times a question out, and the human is under no obligation to answer inside this window.
+/// `estimate_ms` is the point at which a wait stops being routine — past it an agent that is
+/// narrating progress should say it is still blocked rather than going quiet. `expires_at` is
+/// that same point on the clock, so an agent that reschedules can compare it later without
+/// having subtracted anything.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WaitPlan {
+    #[serde(rename = "estimatedMs")]
+    pub estimated_ms: u64,
+    #[serde(rename = "pollIntervalMs")]
+    pub poll_interval_ms: u64,
+    #[serde(rename = "expiresAt")]
+    pub expires_at: u64,
+}
+
+/// What a wait costs when nobody has said how long it takes.
+///
+/// Overridable with `AURAUI_WAIT_ESTIMATE_MS`, because "a person answers in about a minute and
+/// a half" is a claim about people, not about this protocol.
+pub const DEFAULT_WAIT_ESTIMATE_MS: u64 = 90_000;
+/// How often the canvas checks in while a question is unanswered. Mirrored in
+/// `src/lib/protocol.ts`, which is what actually sends them.
+pub const DEFAULT_POLL_INTERVAL_MS: u64 = 5_000;
+/// How many answered questions the bridge keeps for an agent that was not listening.
+pub const RETAINED_ANSWER_LIMIT: usize = 64;
+/// How long a kept answer stays available. Long enough for a whole turn of an agent that
+/// stopped waiting, a page refresh, or a bridge restart; short enough that a long-running
+/// session does not accumulate somebody's whole afternoon.
+pub const RETAINED_ANSWER_TTL_MS: u64 = 600_000;
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum AckStatus {
@@ -181,6 +348,12 @@ pub struct AckFrame {
     #[serde(rename = "taskId")]
     pub task_id: String,
     pub status: AckStatus,
+    /// Present on the ack to a `task`: the confirmation half of asking a person anything.
+    ///
+    /// "Your question is up, expect roughly this long, and here is how often you will hear
+    /// from me in the meantime." Absent on `update` and `resolve` acks, which are not waits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait: Option<WaitPlan>,
 }
 
 /// Every name a component can report back. Kept as an enum so the bridge cannot forward
@@ -236,6 +409,103 @@ pub struct EventFrame {
     pub at: u64,
 }
 
+impl EventName {
+    /// True when this event finishes the question it belongs to.
+    ///
+    /// Mirrors `TERMINAL_EVENTS` in `src/lib/canvasStore.ts`: `ready`, `select`, `change` and
+    /// `sort` describe a question still being answered, so they are signals rather than
+    /// answers and never close a task on the bridge's side either.
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            EventName::Action | EventName::Submit | EventName::Filter | EventName::Cancel
+        )
+    }
+}
+
+/// How far along a question is, from the canvas's point of view.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WaitState {
+    /// The card is up and nobody has touched it.
+    Waiting,
+    /// The human has started: they picked something, typed into a field, moved a slider.
+    Answering,
+}
+
+/// One non-terminal thing the human has done on a card.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Signal {
+    pub event: EventName,
+    pub payload: Value,
+    pub at: u64,
+}
+
+/// A check-in on a question nobody has answered yet.
+///
+/// This is the piece that keeps a waiting agent out of trouble. A tool call that blocks on a
+/// person has to decide what to do with a minute of silence, and the honest answer is nothing
+/// useful: the difference between "she is reading it" and "nobody is at the desk" is not
+/// visible from the outside. So the canvas says which one it is, on a timer, with the partial
+/// answer attached — a form half filled in, a row highlighted, a hunk already decided.
+///
+/// `remaining_ms` saturates at zero rather than going negative: past the estimate the frame
+/// keeps arriving, saying only that the wait is longer than expected.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ProgressFrame {
+    #[serde(default = "protocol_version")]
+    pub v: String,
+    #[serde(rename = "taskId")]
+    pub task_id: String,
+    pub state: WaitState,
+    #[serde(rename = "elapsedMs")]
+    pub elapsed_ms: u64,
+    #[serde(rename = "estimatedMs")]
+    pub estimated_ms: u64,
+    #[serde(rename = "remainingMs")]
+    pub remaining_ms: u64,
+    /// Everything non-terminal the human has done on this card, newest first. Omitted when
+    /// they have only looked at it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub signals: Vec<Signal>,
+    pub at: u64,
+}
+
+/// An agent asking what was answered while it was not listening.
+///
+/// The one question a blocking call cannot answer for itself: a tool call that gave up, or an
+/// agent that was restarted mid-question, has no way to learn what the human eventually said.
+/// This is that way. The bridge keeps terminal events for a while, so asking again is enough —
+/// no second card, and no asking the person to type the same thing twice.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct AnswersRequest {
+    #[serde(default = "protocol_version")]
+    pub v: String,
+    /// Only these tasks. Omitted asks for everything the bridge still holds.
+    #[serde(rename = "taskIds", default, skip_serializing_if = "Option::is_none")]
+    pub task_ids: Option<Vec<String>>,
+}
+
+/// One answer, as it was sent when it happened.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RetainedAnswer {
+    #[serde(rename = "taskId")]
+    pub task_id: String,
+    pub event: EventName,
+    pub payload: Value,
+    /// The same `seq` the live event carried, so a replayed answer and a seen one are the same
+    /// event and an agent can tell it has already handled it.
+    pub seq: u64,
+    pub at: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AnswersFrame {
+    #[serde(default = "protocol_version")]
+    pub v: String,
+    pub items: Vec<RetainedAnswer>,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
@@ -283,6 +553,9 @@ pub enum CanvasFrame {
     Welcome(WelcomeFrame),
     Ack(AckFrame),
     Event(EventFrame),
+    Progress(ProgressFrame),
+    /// The reply to `answers`: what the human said while the agent was not waiting.
+    Answers(AnswersFrame),
     Error(ErrorFrame),
     Pong(PongFrame),
 }
@@ -719,10 +992,10 @@ mod tests {
             json!({"type":"task","taskId":"t1","component":"ActionCard","props":{"options":[]}}),
             json!({"type":"update","taskId":"t1","props":{"x":1}}),
             json!({"type":"resolve","taskId":"t1"}),
-            json!({"type":"notify","level":"warn","message":"careful"}),
             json!({"type":"note","text":"thinking","kind":"thinking"}),
             json!({"type":"ping"}),
         ];
+        // `run` is exercised on its own below, where the expansion is checked too.
         for s in samples {
             let parsed: AgentFrame = serde_json::from_value(s.clone())
                 .unwrap_or_else(|e| panic!("failed on {s}: {e}"));
@@ -732,6 +1005,90 @@ mod tests {
             // Version is filled in when the agent omits it.
             assert_eq!(encoded["v"], PROTOCOL_VERSION);
         }
+    }
+
+    /// A run becomes ordinary questions, in the order it was written, and each one carries
+    /// enough context for the card to say where in the set it sits.
+    #[test]
+    fn a_run_expands_into_ordered_questions() {
+        let frame: RunFrame = serde_json::from_value(json!({
+            "type": "run",
+            "runId": "incident",
+            "instruction": "Four things about the incident.",
+            "questions": [
+                {"id":"area","component":"ActionCard","instruction":"Where?",
+                 "props":{"options":[{"id":"a","label":"A"}]}},
+                {"id":"severity","component":"RatingScale","props":{"max":5}},
+            ],
+        }))
+        .expect("a run frame should parse");
+
+        let tasks = expand_run(&frame).expect("a well-formed run should expand");
+        assert_eq!(tasks.len(), 2);
+        assert_eq!(tasks[0].task_id, "area");
+        assert_eq!(tasks[1].task_id, "severity");
+        assert_eq!(tasks[0].instruction.as_deref(), Some("Where?"));
+        assert_eq!(tasks[0].v, PROTOCOL_VERSION);
+
+        let first = tasks[0].run.as_ref().expect("the first question knows its slot");
+        assert_eq!(first.run_id, "incident");
+        assert_eq!((first.index, first.total), (0, 2));
+        assert_eq!(first.instruction.as_deref(), Some("Four things about the incident."));
+        let second = tasks[1].run.as_ref().unwrap();
+        assert_eq!((second.index, second.total), (1, 2));
+
+        // The `run` slot is what makes the card say "Question 2 of 3"; a lone task has none.
+        let lone: TaskFrame = serde_json::from_value(
+            json!({"type":"task","taskId":"t1","component":"RatingScale","props":{"max":5}}),
+        )
+        .unwrap();
+        assert!(lone.run.is_none());
+        let encoded = serde_json::to_value(&lone).unwrap();
+        assert!(
+            encoded.get("run").is_none(),
+            "a lone task must not carry an empty run slot: {encoded}"
+        );
+    }
+
+    /// Everything that makes a run unanswerable is refused before a single card is drawn,
+    /// and the refusal names the question at fault.
+    #[test]
+    fn refuses_runs_that_cannot_be_asked() {
+        let run = |questions: Value| -> RunFrame {
+            serde_json::from_value(json!({"type":"run","runId":"r","questions":questions}))
+                .expect("the shell of the frame parses")
+        };
+        let card = json!({"id":"only","component":"ActionCard",
+                          "props":{"options":[{"id":"a","label":"A"}]}});
+
+        assert!(expand_run(&run(json!([]))).is_err(), "an empty run asks nothing");
+        assert!(expand_run(&run(json!([{"id":"","component":"ActionCard","props":{"options":[{"id":"a","label":"A"}]}}]))).is_err(),
+            "the id is the task id, so it cannot be blank");
+
+        let repeated = run(json!([
+            {"id":"a","component":"ActionCard","props":{"options":[{"id":"a","label":"A"}]}},
+            {"id":"a","component":"ActionCard","props":{"options":[{"id":"a","label":"A"}]}},
+        ]));
+        let refusal = expand_run(&repeated).expect_err("duplicate ids have no distinct answers");
+        assert_eq!(refusal.question_id.as_deref(), Some("a"));
+
+        let unknown = run(json!([
+            {"id":"ok","component":"ActionCard","props":{"options":[{"id":"a","label":"A"}]}},
+            {"id":"bad","component":"Teleport","props":{}},
+        ]));
+        let refusal = expand_run(&unknown).expect_err("an unknown component is refused");
+        assert_eq!(refusal.question_id.as_deref(), Some("bad"));
+        assert!(refusal.message.contains("Teleport"), "{} should name it", refusal.message);
+
+        // An over-long run is refused as a whole: a form the human did not agree to fill in.
+        let many: Vec<Value> = (0..RUN_LIMIT + 1)
+            .map(|i| json!({"id":format!("q{i}"),"component":"ActionCard",
+                             "props":{"options":[{"id":"a","label":"A"}]}}))
+            .collect();
+        assert!(expand_run(&run(json!(many))).is_err());
+
+        // One question is a legal run; agents just do not need it, and the message says so.
+        assert_eq!(expand_run(&run(json!([card]))).map(|t| t.len()), Ok(1));
     }
 
     #[test]

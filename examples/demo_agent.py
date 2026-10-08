@@ -427,7 +427,6 @@ def run(agent: Agent) -> None:
     print(f"Closing action: {(closed.get('payload') or {}).get('actionId')}")
     print()
 
-    agent.notify("info", "Demo complete.")
     agent.note("Demo complete.", kind="result")
     print("Demo complete.")
 

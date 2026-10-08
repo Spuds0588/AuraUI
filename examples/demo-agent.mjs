@@ -375,7 +375,6 @@ async function run(agent) {
   console.log(`Closing action: ${closed.payload?.actionId}`);
   console.log();
 
-  agent.notify("info", "Demo complete.");
   agent.note("Demo complete.", "result");
   console.log("Demo complete.");
 }

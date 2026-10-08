@@ -3,9 +3,9 @@ import {
   BRIDGE_URL,
   type CanvasState,
   type EventName,
+  expandRun,
   type LiveTask,
   type Note,
-  type Notice,
   type TaskFrame,
 } from "./protocol";
 
@@ -13,8 +13,6 @@ import {
 export const MAX_TASKS = 24;
 /** Narration lines kept, so the newest one can be shown while the canvas is idle. */
 export const MAX_NOTES = 80;
-/** Simultaneous toasts. */
-export const MAX_NOTICES = 4;
 /**
  * How long an unanswerable question stays on screen before it is dropped.
  *
@@ -45,7 +43,7 @@ function uid(prefix: string): string {
 }
 
 export function createInitialState(bridgeUrl: string = BRIDGE_URL): CanvasState {
-  return { sessionId: "", bridgeUrl, connected: [], tasks: [], notices: [], notes: [] };
+  return { sessionId: "", bridgeUrl, connected: [], tasks: [], notes: [] };
 }
 
 /** The bridge came up (or the demo transport announced itself). */
@@ -102,14 +100,15 @@ export function applyAgentFrame(state: CanvasState, frame: AgentFrame): CanvasSt
         at: Date.now(),
       });
 
-    case "notify":
-      return {
-        ...state,
-        notices: [
-          { id: uid("notice"), level: frame.level, message: frame.message, at: Date.now() },
-          ...state.notices,
-        ].slice(0, MAX_NOTICES),
-      };
+    case "run": {
+      // One request, several questions. The bridge has already expanded a run by the time the
+      // desktop canvas sees anything, so this path is the demo's: the scripted agent speaks
+      // the documented protocol too, and a run it sends has to land the same way.
+      return expandRun(frame).reduce<CanvasState>(
+        (next, task) => applyAgentFrame(next, task),
+        state,
+      );
+    }
 
     case "note":
       return {
@@ -244,39 +243,26 @@ export function secondsUntilExpiry(
 /**
  * Drop unanswered questions whose agent left and whose grace period has run out.
  *
- * Says so in a toast rather than letting the question disappear silently: from the human's
- * side a card that vanishes on its own is indistinguishable from a bug.
+ * Nothing is said about it in the corner: the card counts itself down out loud before this
+ * happens, and it leaves with the same motion every other card leaves with. A badge in the
+ * corner explaining a card that has visibly left is chrome parked over the desktop for no
+ * reason — the same argument that removed the agent-facing toast.
  */
 export function expireOrphaned(
   state: CanvasState,
   now: number = Date.now(),
   graceMs: number = ORPHAN_GRACE_MS,
 ): CanvasState {
-  const gone = state.tasks.filter(
-    (task) => !task.resolved && task.orphanedAt !== undefined && now - task.orphanedAt >= graceMs,
+  const abandoned = new Set(
+    state.tasks
+      .filter(
+        (task) =>
+          !task.resolved && task.orphanedAt !== undefined && now - task.orphanedAt >= graceMs,
+      )
+      .map((task) => task.frame.taskId),
   );
-  if (gone.length === 0) return state;
-
-  const abandoned = new Set(gone.map((task) => task.frame.taskId));
-  const notice: Notice = {
-    id: uid("notice"),
-    level: "warn",
-    message:
-      gone.length === 1
-        ? "The agent disconnected, so its unanswered question was withdrawn."
-        : `The agent disconnected, so ${gone.length} unanswered questions were withdrawn.`,
-    at: now,
-  };
-
-  return {
-    ...state,
-    tasks: state.tasks.filter((task) => !abandoned.has(task.frame.taskId)),
-    notices: [notice, ...state.notices].slice(0, MAX_NOTICES),
-  };
-}
-
-export function dismissNotice(state: CanvasState, id: string): CanvasState {
-  return { ...state, notices: state.notices.filter((n) => n.id !== id) };
+  if (abandoned.size === 0) return state;
+  return { ...state, tasks: state.tasks.filter((task) => !abandoned.has(task.frame.taskId)) };
 }
 
 export interface QuestionQueue {

@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use auraui_lib::bridge::{Bridge, BridgeConfig, BridgeError, BridgeHandle, Delivery, UiSink};
-use auraui_lib::protocol::{AgentFrame, BridgeStatus, EventName};
+use auraui_lib::protocol::{AgentFrame, BridgeStatus, EventName, Signal, WaitState};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
@@ -575,6 +575,226 @@ async fn tasks_wait_in_the_queue_while_nothing_is_attached() {
     send_json(&mut ws, json!({"type":"resolve","taskId":"q2"})).await;
     let ack = recv_json(&mut ws).await;
     assert_eq!(ack["status"].as_str(), Some("resolved"));
+
+    handle.shutdown();
+}
+
+/* ------------------------------------------------------------------ *
+ * Waiting on a person
+ * ------------------------------------------------------------------ */
+
+/// The three frames that make a question survivable by an agent: the wait is quoted when the
+/// call is accepted, the wait is reported while it lasts, and the answer is kept after it.
+#[tokio::test]
+async fn a_task_quotes_its_wait_and_keeps_its_answer() {
+    let sink = Arc::new(TestSink::new(Delivery::Attached));
+    let handle = start_bridge(sink.clone()).await;
+    let mut ws = connect(&handle).await;
+    assert_eq!(recv_json(&mut ws).await["type"].as_str(), Some("welcome"));
+
+    send_json(
+        &mut ws,
+        json!({
+            "type": "task",
+            "taskId": "triage",
+            "component": "ActionCard",
+            "props": { "options": [{ "id": "investigate", "label": "Investigate" }] },
+        }),
+    )
+    .await;
+
+    // The confirmation half: the call is accepted, and it comes with an expectation.
+    let ack = recv_json(&mut ws).await;
+    assert_eq!(ack["type"].as_str(), Some("ack"));
+    assert_eq!(ack["status"].as_str(), Some("rendered"));
+    let estimated = ack["wait"]["estimatedMs"].as_u64().expect("a wait estimate");
+    let poll = ack["wait"]["pollIntervalMs"].as_u64().expect("a poll interval");
+    let expires = ack["wait"]["expiresAt"].as_u64().expect("an expiry instant");
+    assert!(estimated > 0 && poll > 0, "both numbers must be usable: {ack}");
+    assert!(
+        expires >= now_ms() + estimated - 1_000,
+        "expiry should be the estimate from now, not from the epoch: {ack}"
+    );
+
+    // A check-in while nobody has answered it, which is what the canvas sends on that
+    // interval and whenever the human touches the card.
+    let sent = handle.emit_progress(
+        "triage",
+        WaitState::Answering,
+        12_500,
+        vec![Signal {
+            event: EventName::Select,
+            payload: json!({ "rowIds": ["smoke-8843"] }),
+            at: now_ms(),
+        }],
+    );
+    assert_eq!(sent.state, WaitState::Answering);
+    assert_eq!(sent.remaining_ms, estimated - 12_500);
+
+    let progress = recv_json(&mut ws).await;
+    assert_eq!(progress["type"].as_str(), Some("progress"));
+    assert_eq!(progress["taskId"].as_str(), Some("triage"));
+    assert_eq!(progress["state"].as_str(), Some("answering"));
+    assert_eq!(progress["elapsedMs"].as_u64(), Some(12_500));
+    assert_eq!(
+        progress["signals"][0]["event"].as_str(),
+        Some("select"),
+        "a partial answer rides along with the check-in: {progress}"
+    );
+
+    // A wait that outlasts the estimate stays a wait: the number saturates rather than
+    // going negative, and nothing times the question out.
+    let late = handle.emit_progress("triage", WaitState::Waiting, estimated + 5_000, vec![]);
+    assert_eq!(late.remaining_ms, 0, "remaining time must not go negative");
+    let _ = recv_json(&mut ws).await;
+
+    // The human answers.
+    handle.emit_event("triage", EventName::Action, json!({ "actionId": "investigate" }));
+    let event = recv_json(&mut ws).await;
+    assert_eq!(event["type"].as_str(), Some("event"));
+    assert_eq!(event["event"].as_str(), Some("action"));
+
+    // An agent that was not waiting when it landed — a restarted one, or one whose own
+    // deadline passed — asks for the answer instead of asking the person twice.
+    let mut late_agent = connect(&handle).await;
+    assert_eq!(recv_json(&mut late_agent).await["type"].as_str(), Some("welcome"));
+
+    send_json(
+        &mut late_agent,
+        json!({ "type": "answers", "taskIds": ["triage"] }),
+    )
+    .await;
+    let answers = recv_json(&mut late_agent).await;
+    assert_eq!(answers["type"].as_str(), Some("answers"));
+    assert_eq!(answers["items"][0]["taskId"].as_str(), Some("triage"));
+    assert_eq!(answers["items"][0]["event"].as_str(), Some("action"));
+    assert_eq!(answers["items"][0]["payload"]["actionId"].as_str(), Some("investigate"));
+    assert_eq!(
+        answers["items"][0]["seq"].as_u64(),
+        event["seq"].as_u64(),
+        "a retained answer is the same event, not a copy: {answers}"
+    );
+
+    // Asking for everything kept is the same answer, and a question nobody answered has
+    // nothing to hand back.
+    send_json(&mut late_agent, json!({ "type": "answers" })).await;
+    let everything = recv_json(&mut late_agent).await;
+    assert_eq!(everything["items"].as_array().map(Vec::len), Some(1));
+
+    send_json(
+        &mut late_agent,
+        json!({ "type": "answers", "taskIds": ["never-asked"] }),
+    )
+    .await;
+    assert_eq!(
+        recv_json(&mut late_agent).await["items"].as_array().map(Vec::len),
+        Some(0),
+        "a task nobody answered must not be invented from the retention list"
+    );
+
+    handle.shutdown();
+}
+
+/* ------------------------------------------------------------------ *
+ * Asking several questions in one call
+ * ------------------------------------------------------------------ */
+
+/// A run is one request and several questions: each question is acked and delivered as if it
+/// had been asked alone, carrying only enough context for the card to place it in the set.
+#[tokio::test]
+async fn a_run_becomes_ordered_questions_with_one_answer_each() {
+    let sink = Arc::new(TestSink::new(Delivery::Attached));
+    let mut delivered = sink.subscribe();
+    let handle = start_bridge(sink.clone()).await;
+    let mut ws = connect(&handle).await;
+    assert_eq!(recv_json(&mut ws).await["type"].as_str(), Some("welcome"));
+
+    send_json(
+        &mut ws,
+        json!({
+            "type": "run",
+            "runId": "incident",
+            "instruction": "Three things about the incident.",
+            "questions": [
+                {"id":"area","component":"ActionCard","instruction":"Where did it break?",
+                 "props":{"options":[{"id":"checkout","label":"Checkout"}]}},
+                {"id":"severity","component":"RatingScale","props":{"max":5}},
+                {"id":"patch","component":"DiffReview",
+                 "props":{"hunks":[{"id":"h1","lines":[{"kind":"add","text":"+x"}]}]}},
+            ],
+        }),
+    )
+    .await;
+
+    // Each question is acknowledged on its own id, with the same wait plan a lone task gets.
+    for expected in ["area", "severity", "patch"] {
+        let ack = recv_json(&mut ws).await;
+        assert_eq!(ack["type"].as_str(), Some("ack"));
+        assert_eq!(ack["taskId"].as_str(), Some(expected), "acks must name the question: {ack}");
+        assert_eq!(ack["status"].as_str(), Some("rendered"));
+        assert!(ack["wait"]["estimatedMs"].as_u64().unwrap_or(0) > 0);
+    }
+
+    // The surface receives one ordinary task per question, in the order they were written.
+    let mut seen = Vec::new();
+    for _ in 0..3 {
+        let frame = delivered
+            .recv()
+            .await
+            .expect("the surface should receive every question of the run");
+        match frame {
+            AgentFrame::Task(task) => seen.push(task),
+            other => panic!("a run must reach the surface as tasks, got {other:?}"),
+        }
+    }
+    assert_eq!(
+        seen.iter().map(|task| task.task_id.as_str()).collect::<Vec<_>>(),
+        vec!["area", "severity", "patch"],
+        "a run is asked in the order it was written"
+    );
+    let slot = seen[1].run.as_ref().expect("the second question knows its slot");
+    assert_eq!(slot.run_id, "incident");
+    assert_eq!((slot.index, slot.total), (1, 3));
+    assert_eq!(
+        slot.instruction.as_deref(),
+        Some("Three things about the incident."),
+        "the run's own sentence is repeated on each card"
+    );
+    assert_eq!(seen[1].instruction.as_deref(), None, "this question has no sentence of its own");
+
+    // And answers come back per question, exactly as they would for three lone tasks.
+    handle.emit_event("area", EventName::Action, json!({"actionId":"checkout"}));
+    let answer = recv_json(&mut ws).await;
+    assert_eq!(answer["taskId"].as_str(), Some("area"));
+    assert_eq!(answer["event"].as_str(), Some("action"));
+
+    // A run the bridge refuses delivers nothing and is blamed on the question at fault.
+    send_json(
+        &mut ws,
+        json!({
+            "type": "run",
+            "runId": "typo",
+            "questions": [
+                {"id":"ok","component":"ActionCard",
+                 "props":{"options":[{"id":"a","label":"A"}]}},
+                {"id":"broken","component":"ActionCard","props":{}},
+            ],
+        }),
+    )
+    .await;
+    let error = recv_json(&mut ws).await;
+    assert_eq!(error["type"].as_str(), Some("error"));
+    assert_eq!(error["code"].as_str(), Some("bad_frame"));
+    assert_eq!(
+        error["taskId"].as_str(),
+        Some("broken"),
+        "the error must name the question to fix: {error}"
+    );
+    assert!(
+        error["message"].as_str().unwrap_or_default().contains("props.options"),
+        "the message should say what is wrong: {error}"
+    );
+    assert!(delivered.try_recv().is_err(), "a refused run must not draw half a card");
 
     handle.shutdown();
 }

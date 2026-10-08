@@ -6,6 +6,81 @@ client summons a component in it and blocks until the human answers.
 Pure standard library. No dependencies at all — the WebSocket transport is implemented in
 `auraui/_ws.py`, so this installs into a locked-down environment and runs on Python 3.9+.
 
+## Asking several questions at once
+
+An agent with four independent things to ask will fan them out as four calls, and the human
+then works through four cards that nothing ties together. `ask_many()` is the same fan-out as
+one request: each question is still its own card, answered with one press, but the set arrives
+as a run and one call returns all of them.
+
+```python
+answers = agent.ask_many(
+    [
+        {"id": "suspect", "component": "ActionCard",
+         "instruction": "Does 9f3c1a02 match what you know?",
+         "props": c.action_card([c.option("yes", "That is the one"), c.option("no", "Not it")])},
+        {"id": "timing", "component": "RatingScale",
+         "instruction": "How much warning did you have?",
+         "props": c.rating_scale(max=4, labels=["None", "Minutes", "An hour", "All day"])},
+    ],
+    instruction="Neither of these depends on the other, so I asked both at once.",
+)
+
+answers[0]["taskId"]    # "suspect" — the id you gave it is the task id
+answers[1]["payload"]   # {"value": 3, "min": 1, "max": 4, ...}
+```
+
+A card in a run says "Question 2 of 4", and the line under it counts what is left in the set
+separately from anything else queued. Ask this way when you already know every question you
+need; split back into `task()` calls at the point where question n+1 depends on the answer to
+question n, because that interview is the thing this canvas is for.
+
+At most twelve questions (`auraui.RUN_LIMIT`), with ids present and unique and every props
+dict valid. The bridge checks all of that before drawing anything, and a refusal names the
+question at fault in `taskId` while drawing no card at all. `wait_for(id)` and `answers([id])`
+work on a run's questions exactly as they do on a lone task, so a run that outlives your
+patience is still collectable.
+
+## Waiting on a person
+
+`task()` blocks, which is what a tool call does, and it is usually the right shape. What a
+tool call does not normally have to survive is a *human* delay, so three things exist for it.
+
+**The ack confirms the call and quotes the wait.** Every `task` frame is acked in
+milliseconds, and that ack carries `wait`: `{"estimatedMs", "pollIntervalMs", "expiresAt"}`.
+`estimatedMs` is how long an answer usually takes here. Nothing times a question out — past
+`expiresAt` the card is still up and the check-ins keep coming.
+
+**`progress` says whether anyone is answering it.** On the quoted interval, and immediately
+whenever the human touches the card:
+
+```python
+agent.on_progress(lambda frame: print(frame["state"], frame["remainingMs"], frame["signals"]))
+```
+
+`state` is `waiting` until somebody touches the card and `answering` after; `signals` carries
+their partial moves (a highlighted row, a half-filled form) newest first, so an answer can be
+acted on before it is finished. A long run of `waiting` is the only evidence available that
+nobody is at the desk.
+
+**A deadline is not a withdrawal.** If `task(timeout=...)` raises `TaskTimeout`, the card is
+still on screen and the bridge still holds the answer. Come back for it rather than asking the
+person twice:
+
+```python
+answer = agent.wait_for("task_9f3c1a02")          # what the bridge kept, or the live socket
+kept = agent.answers(["task_9f3c1a02"])           # one-shot read of everything kept
+```
+
+The bridge keeps terminal events for ten minutes (the last 64), so this also covers an agent
+restarted mid-question or a host resuming a turn the human answered during. `seq` on a
+retained answer is the same number the live event carried.
+
+Note the shape of the answer to "can the answer be pushed back into the agent?": not into the
+model's context, no. Something has to ask — `wait_for`, `answers`, a re-sent `task`, or a host
+that re-invokes the tool (which is what MCP's Multi Round-Trip Requests and its experimental
+Tasks are for). `docs/PROTOCOL.md` §8 covers both protocols side by side.
+
 ## Install
 
 ```bash
@@ -75,9 +150,11 @@ are not waiting on fires `orphan` and prints a warning rather than raising.
 | `Agent(name, version=None, vendor=None, url=DEFAULT_URL, reconnect=True, capabilities=None, connect_timeout=10.0)` | `url` defaults to `ws://127.0.0.1:9090`. |
 | `connect(timeout=None)` | Opens the socket, sends `hello`, returns the `welcome` frame. |
 | `task(component, props, task_id=None, instruction=None, urgent=False, timeout=None)` | Summons a component and blocks. `timeout` is in seconds. |
+| `ask_many(questions, run_id=None, instruction=None, timeout=None)` | One request carrying several questions; returns the answers in the order asked. |
 | `resolve(task_id, reason=None)` | Withdraws a task before the human answers. |
+| `wait_for(task_id, timeout=None)` | Keeps waiting on a question this call did not wait for; resolves from a retained answer when there is one. |
+| `answers(task_ids=None, timeout=5.0)` | Reads the answers the bridge kept: what the human said while nobody was waiting. |
 | `update(task_id, props=None, instruction=None)` | Patches a live task, e.g. to feed a chart drill-down. |
-| `notify(level, message)` | `info` \| `success` \| `warn` \| `error`. A transient toast. |
 | `note(text, kind="meta")` | `thinking` \| `progress` \| `result` \| `meta`. One line of narration, shown when the canvas is idle. |
 | `ping()` | Liveness probe; AuraUI answers with `pong`. |
 | `close(timeout=2.0)` | Closes the socket and fails anything in flight. Idempotent. |
@@ -203,11 +280,14 @@ One JSON object per WebSocket text message, protocol version `1.0`.
 | --- | --- |
 | `hello` | `agent: { name, version?, vendor?, capabilities? }` |
 | `task` | `taskId, component, props, instruction?, urgent?` |
+| `run` | `runId, questions[] (1–12 × `id, component, props, instruction?, urgent?`), instruction?` |
 | `update` | `taskId, props?, instruction?` |
 | `resolve` | `taskId, reason?` |
-| `notify` | `level, message` |
 | `note` | `text, kind?` |
 | `ping` | — |
+| `answers` | `taskIds?` — omitted asks for everything the bridge still holds. |
+| `progress` (in) | `taskId, state, elapsedMs, estimatedMs, remainingMs, signals[], at` |
+| `answers` (in) | `items[]` of `taskId, event, payload, seq, at` |
 
 **AuraUI to agent**
 

@@ -1,5 +1,7 @@
 import { useMemo, useState } from "react";
+import { KeyHint } from "@/components/ui";
 import type { TaskComponentProps } from "@/components/renderer/types";
+import { optionKeys, useOptionKeys } from "@/lib/keyboard";
 import type { RatingScaleProps } from "@/lib/protocol";
 import { cn } from "@/lib/utils";
 
@@ -60,6 +62,16 @@ export default function RatingScale({
   const chosenLabel = value === null ? undefined : labels[value - min];
   const legend = props?.legend;
 
+  // The whole scale is one row of presses, so the whole scale is one row of keys.
+  const keys = useMemo(() => optionKeys(points.length), [points.length]);
+  useOptionKeys(() =>
+    points.map((point, index) => ({
+      key: keys[index] ?? "",
+      run: () => pick(point),
+      disabled: locked,
+    })),
+  );
+
   if (points.length === 0) {
     return (
       <p className="text-xs text-muted-foreground">
@@ -97,7 +109,7 @@ export default function RatingScale({
         aria-label="Rating scale"
         className="flex flex-wrap items-stretch gap-2.5"
       >
-        {points.map((point) => {
+        {points.map((point, index) => {
           const on = value === point;
           const label = labels[point - min];
           return (
@@ -118,13 +130,16 @@ export default function RatingScale({
                   : "border-input bg-background/60 hover:border-border hover:bg-secondary/60",
               )}
             >
-              <span
-                className={cn(
-                  "text-sm tabular-nums",
-                  on ? "font-semibold text-foreground" : "text-foreground/80",
-                )}
-              >
-                {point}
+              <span className="flex items-center gap-1.5">
+                <span
+                  className={cn(
+                    "text-sm tabular-nums",
+                    on ? "font-semibold text-foreground" : "text-foreground/80",
+                  )}
+                >
+                  {point}
+                </span>
+                <KeyHint keys={keys[index]} />
               </span>
               {label ? (
                 <span className="max-w-[7.5rem] text-[10px] leading-snug text-muted-foreground">

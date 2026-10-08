@@ -35,7 +35,7 @@ use tauri::{Emitter, Manager};
 use crate::bridge::{
     log, log_error, offline_status, Bridge, BridgeConfig, BridgeHandle, Delivery, UiSink,
 };
-use crate::protocol::{AgentFrame, BridgeStatus, EventFrame, EventName};
+use crate::protocol::{AgentFrame, BridgeStatus, EventFrame, EventName, ProgressFrame, Signal, WaitState};
 
 /// Emitted to the webview for every frame an agent sends that the bridge accepted.
 pub const FRAME_EVENT: &str = "auraui://frame";
@@ -140,6 +140,25 @@ fn auraui_emit(
     let handle = current_handle(state.inner())
         .ok_or_else(|| "the AuraUI bridge is not running yet".to_string())?;
     Ok(handle.emit_event(&task_id, event, payload))
+}
+
+/// The canvas checking in on a question that is still unanswered.
+///
+/// The webview owns the clock and the human's activity; the bridge owns the socket and the
+/// stamp. So the canvas sends *what it knows* — how long the card has been up, whether anyone
+/// has touched it, and what they have said so far on it — and the envelope, the estimate and
+/// the `at` stamp are added here. Splitting it this way keeps one clock in the protocol.
+#[tauri::command]
+fn auraui_progress(
+    state: tauri::State<'_, Arc<BridgeState>>,
+    task_id: String,
+    phase: WaitState,
+    elapsed_ms: u64,
+    signals: Vec<Signal>,
+) -> Result<ProgressFrame, String> {
+    let handle = current_handle(state.inner())
+        .ok_or_else(|| "the AuraUI bridge is not running yet".to_string())?;
+    Ok(handle.emit_progress(&task_id, phase, elapsed_ms, signals))
 }
 
 /// Current connection state, safe to poll at any time (including before the bridge is up).
@@ -272,6 +291,7 @@ pub fn run() {
         .manage(Arc::new(BridgeState::new()))
         .invoke_handler(tauri::generate_handler![
             auraui_emit,
+            auraui_progress,
             auraui_status,
             auraui_attach,
             auraui_detach,

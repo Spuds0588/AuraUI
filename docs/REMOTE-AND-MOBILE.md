@@ -16,8 +16,8 @@ and until this week's change the canvas would happily leave a question on screen
 silently did nothing.
 
 The behaviour now: the card turns read-only, says why in a line of its own, counts down six
-seconds, and is dropped with a toast. A reconnect inside the window makes it answerable again.
-The full description is in `PROTOCOL.md` §7.
+seconds, and leaves like any other card. A reconnect inside the window makes it answerable
+again. The full description is in `PROTOCOL.md` §7.
 
 ### The other option, and why it lost
 
