@@ -934,17 +934,18 @@ export function interactiveChart(vegaSchema, data, { height, drillable, hint } =
  * Props for RatingScale: one bounded scale, answered by pressing a single point.
  *
  * AuraUI has no slider, no star rating and no dropdown, so a scale is a row of buttons with
- * the numbers on them. Every point is on screen and reachable by keyboard, and the whole
- * question is answered in one press.
+ * the numbers on them. Every point is on screen and reachable by keyboard, and the press is
+ * the answer: nothing is sent until the human presses, and nothing is asked afterwards. There
+ * is no label to give a confirm button because there is no confirm button.
  *
  * The agent owns the words: `labels` names each point and `legend` names the two ends. AuraUI
  * never invents "1 = terrible".
  *
  * @param {number} max Highest point, inclusive. 2 to 10.
  * @param {{min?: number, labels?: string[], legend?: {low?: string, high?: string},
- *          defaultValue?: number, submitLabel?: string, help?: string}} [extra]
+ *          defaultValue?: number, help?: string}} [extra]
  */
-export function ratingScale(max, { min = 1, labels, legend, defaultValue, submitLabel, help } = {}) {
+export function ratingScale(max, { min = 1, labels, legend, defaultValue, help } = {}) {
   if (!Number.isInteger(max) || max < RATING_MIN || max > RATING_MAX) {
     throw new AuraUIError(
       `ratingScale max must be an integer between ${RATING_MIN} and ${RATING_MAX}: ` +
@@ -971,20 +972,24 @@ export function ratingScale(max, { min = 1, labels, legend, defaultValue, submit
   ) {
     throw new AuraUIError(`ratingScale defaultValue must be an integer between ${min} and ${max}.`);
   }
-  return compact({ min, max, labels, legend, defaultValue, submitLabel, help });
+  return compact({ min, max, labels, legend, defaultValue, help });
 }
 
 /**
  * Props for DiffReview: "accept this part of my change, or not".
  *
- * Every hunk needs a decision before the review can be submitted, and the decision is made by
- * pressing one of two buttons per hunk. There is no checkbox to tick, which is the point: the
- * human has to look at each hunk and choose.
+ * Every hunk needs a decision, and the decision is made by pressing one of two buttons per
+ * hunk. There is no checkbox to tick, which is the point: the human has to look at each hunk
+ * and choose.
+ *
+ * The decision is also the submit. The press that settles the last open hunk sends the review,
+ * so one hunk on a card is one press end to end — which is why the examples send one hunk per
+ * card rather than a wall of decisions.
  *
  * @param {object[]} hunks Built with `diffHunk()`.
- * @param {{title?: string, submitLabel?: string, footnote?: string}} [extra]
+ * @param {{title?: string, footnote?: string}} [extra]
  */
-export function diffReview(hunks, { title, submitLabel, footnote } = {}) {
+export function diffReview(hunks, { title, footnote } = {}) {
   requireNonEmptyArray(hunks, "diffReview hunks");
   hunks.forEach((hunk, index) => {
     if (typeof hunk !== "object" || hunk === null) {
@@ -1003,7 +1008,7 @@ export function diffReview(hunks, { title, submitLabel, footnote } = {}) {
       }
     }
   });
-  return compact({ hunks, title, submitLabel, footnote });
+  return compact({ hunks, title, footnote });
 }
 
 /** Namespace holding every prop builder, for `import { components as c }`. */

@@ -182,15 +182,42 @@ export interface ClickedOption {
   label?: string;
 }
 
+/**
+ * A recording the human made while answering a question that needed words.
+ *
+ * Not every spoken answer is a sentence. *Hum the tune*, *say it with the inflection you
+ * heard*, *read this script so we have a voice track to cut against the video* — those are
+ * answers that only exist as sound, so the canvas keeps the sound and the transcript is an
+ * extra on top of it rather than a replacement for it. An agent that only wants the words can
+ * read `values` and ignore this.
+ *
+ * `data` is base64 without the `data:` prefix, because it travels inside a JSON text frame
+ * like everything else. The canvas refuses to carry more than a minute and a half of audio in
+ * one answer; past that it sends the words alone.
+ */
+export interface AudioClip {
+  /** What the webview produced: `audio/webm;codecs=opus`, `audio/ogg`, `audio/mp4`, … */
+  mime: string;
+  /** How long the human spoke, measured from the start of the take. */
+  durationMs: number;
+  /** The audio itself, base64, no data-URL prefix. */
+  data: string;
+}
+
 export interface EventPayload {
   /** The component mounted and is now visible to the human. */
   ready: { component: ComponentName };
   /** An ActionCard-style choice was clicked. */
   action: { actionId: string; label?: string; source?: ComponentName };
   /**
-   * The human confirmed a form, list, grid, scale or diff. Which fields are present depends
+   * The human answered a form, list, grid, scale or diff. Which fields are present depends
    * on the component, so the shape is a superset rather than a union: an agent that only
    * reads `values` must keep working when it is sent a grid.
+   *
+   * Most components reach this on the human's *first* press, because a choice, a rating, a row
+   * and a hunk decision are all one gesture. Only a question that needs words — a form with a
+   * field to type in, a list to order, a multi-select set — has a button left to press after
+   * the answer is made.
    */
   submit: {
     component: ComponentName;
@@ -208,6 +235,13 @@ export interface EventPayload {
     accepted?: string[];
     /** DiffReview: the hunk ids the human rejected, in the order they were sent. */
     rejected?: string[];
+    /**
+     * Voice: recordings from the voice button, keyed by the field they answer.
+     *
+     * Present only for the fields the human actually spoke into, so an agent can tell the
+     * difference between a question they typed and one they answered out loud.
+     */
+    audio?: Record<string, AudioClip>;
   };
   /** Selection changed in a DataGrid. Fires before any explicit submit. */
   select: { rowIds: string[]; rows: Row[] };
@@ -377,6 +411,10 @@ export interface InteractiveChartProps {
  * rating or a dropdown — all of which AuraUI refuses. Every point is a button with a number
  * on it, so the whole range is visible, reachable by keyboard, and answered in one press.
  *
+ * The press is the answer, so there is no `submitLabel` here: there is no button for a label
+ * to be on. A scale is asked and answered in one motion, and the canvas turns into the receipt
+ * for the point that was pressed.
+ *
  * The agent owns the words: `labels` names the points, `legend` names the ends. AuraUI never
  * invents "1 = terrible".
  */
@@ -389,9 +427,8 @@ export interface RatingScaleProps {
   labels?: string[];
   /** Names the two ends, as in `{ low: "not urgent", high: "drop everything" }`. */
   legend?: { low?: string; high?: string };
-  /** A point chosen up front, highlighted but not yet submitted. */
+  /** A point highlighted before anyone has pressed anything. A hint, not an answer. */
   defaultValue?: number;
-  submitLabel?: string;
   help?: string;
 }
 
@@ -423,12 +460,15 @@ export interface DiffHunk {
  *
  * Every hunk needs a decision before the review can be submitted, and the decision is made
  * by pressing one of two buttons per hunk — no checkbox anywhere in sight.
+ *
+ * There is no `submitLabel`: the press that decides the last open hunk *is* the submit. A card
+ * carrying one hunk — the shape an agent should be sending, since one card is one question —
+ * is therefore answered end to end by a single press.
  */
 export interface DiffReviewProps {
   hunks: DiffHunk[];
   /** Text above the hunk list, for a summary like "3 files, 2 risky hunks". */
   title?: string;
-  submitLabel?: string;
   footnote?: string;
 }
 

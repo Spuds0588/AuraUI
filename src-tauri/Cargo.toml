@@ -36,6 +36,12 @@ tokio-tungstenite = "0.24"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 uuid = { version = "1", features = ["v4"] }
 
+# Only so the webview's microphone permission can be answered: `with_webview` hands over a
+# `webkit2gtk::WebView`, and the trait that connects the signal lives in this crate. Pinned to
+# the same 2.0 line wry already resolves to, so it adds no second copy of the binding.
+[target.'cfg(target_os = "linux")'.dependencies]
+webkit2gtk = "2.0"
+
 [dev-dependencies]
 tokio-tungstenite = "0.24"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }

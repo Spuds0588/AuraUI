@@ -136,7 +136,9 @@ function incidentQuestion(id: string): AgentFrame | undefined {
         instruction:
           "What does it look like? Anything you noticed that the logs would not show.",
         props: {
-          submitLabel: "Next",
+          // The one question in this script that needs typing, so it is the one that keeps a
+          // button. It also carries the voice control: pressing Speak says it instead.
+          submitLabel: "Send this answer",
           steps: [
             {
               id: "symptom",
@@ -147,6 +149,7 @@ function incidentQuestion(id: string): AgentFrame | undefined {
                   label: "Describe it in your own words",
                   type: "textarea",
                   placeholder: "e.g. the spinner never resolves after the payment step",
+                  help: "Type it, or press Speak and say it. Whichever is faster.",
                   validate: { maxLength: 600 },
                 },
               ],
@@ -216,7 +219,8 @@ function incidentQuestion(id: string): AgentFrame | undefined {
         component: "WizardForm",
         instruction: "Who should get this report? Pick as many as you like.",
         props: {
-          submitLabel: "Next",
+          // Several options in one question, so the human decides when they are done.
+          submitLabel: "Send recipients",
           steps: [
             {
               id: "notify",
@@ -276,13 +280,14 @@ function anomalyFrame(): AgentFrame {
     taskId: "anomaly",
     component: "DataGrid",
     instruction:
-      "Five smoke runs are in range. Select the one you want me to bisect first, then submit.",
+      "Five smoke runs are in range. Press the one you want me to bisect first — that press " +
+      "is the whole answer.",
     props: {
+      // One row is the answer, so there is no submit button to reach for afterwards.
       selectMode: "single",
       sortable: true,
       filterable: true,
       pageSize: 5,
-      submitLabel: "Bisect this run",
       rowKey: "id",
       columns: [
         { key: "id", header: "Run", type: "mono" },
@@ -315,8 +320,8 @@ function diffFrame(taskId: string, index: number): AgentFrame {
       "and I will apply exactly what you approve.",
     props: {
       title: hunk.header,
-      submitLabel: "Decide this hunk",
-      footnote: "This hunk needs a decision before I touch the branch.",
+      // No submit label: deciding the hunk *is* the submit, so the card is one press.
+      footnote: "Accept or reject it and I will apply exactly that.",
       hunks: [hunk],
     },
   });
@@ -669,8 +674,8 @@ export function demoReply(
                 "Something is wrong",
               ],
               legend: { low: "confident", high: "worried" },
-              submitLabel: "Send my confidence",
-              help: "One press. No slider to drag, no dropdown to open.",
+              // No submit label: pressing a point sends it, so the scale is one press.
+              help: "One press answers it. No slider to drag, no dropdown to open, nothing to send afterwards.",
             },
           }),
         },
@@ -729,6 +734,7 @@ export function demoReply(
                 "The chart data and the diff both came from the agent, so nothing on the canvas was invented",
                 "All eight question kinds ran, and not one of them is a checkbox, a radio button or a dropdown",
                 "Each card asked one question, so nothing was half-answered",
+                "The choice, the row, the rating and the hunk each answered themselves on the press — no second button to find",
                 "Run the same session against the desktop app and the answers arrive identically",
               ],
               actions: [

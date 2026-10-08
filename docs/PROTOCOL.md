@@ -64,7 +64,7 @@ the desktop, and gets out of the way when there is nothing to ask. Everything yo
 queued and answered **first asked, first answered**. Nothing reorders itself under someone
 who is mid-answer.
 
-Three consequences worth designing around:
+Four consequences worth designing around:
 
 - **Do not fan out.** Sending six unrelated tasks at once does not show six cards; it shows
   one and makes the human work through a queue. Prefer one question that decides the next.
@@ -72,6 +72,11 @@ Three consequences worth designing around:
   many questions are waiting, so the human knows whether they are nearly done.
 - **`note` and `notify` are not queued.** Narration is narration; a `notify` shows as a toast
   without pushing anything into the queue.
+- **One press finishes a question.** A choice, a row in a single-select grid, a point on a
+  scale and a hunk decision are all sent by the press that makes them. Only a question that
+  needs words — a field to type in, a set to assemble, a list to order — asks for a button
+  afterwards. Do not invent a confirmation the human has to click through: the canvas will not
+  draw one.
 
 ## 2. Agent to canvas
 
@@ -207,10 +212,35 @@ because understanding is not answering.
 `DataGrid` → `submit` (selection alone is `select`) · `InteractiveChart` → `filter` ·
 `RatingScale` → `submit` · `DiffReview` → `submit`.
 
+#### One press, one answer
+
+**A question that takes one press reaches its terminal event on that press.** A choice, a row
+in a single-select grid, a point on a scale and a hunk decision are all complete gestures: the
+human has said what they mean, so the canvas sends it and does not ask again. There is no
+"Next" or "Confirm" button on any of them, because a confirm button turns a one-click answer
+into two.
+
+What still has a button is the shape that genuinely cannot finish on a press:
+
+| Still has a button | Why |
+| --- | --- |
+| A `WizardForm` step with a `text`, `textarea`, `number` or `date` field | The human has to type, and only they know when they have stopped. |
+| A `WizardForm` step with a `multi` field | Picking a second option is not the same gesture as taking the first one back. |
+| A `WizardForm` step with more than one field, or more than one step | Several questions, so no single press finished them. |
+| A `SortableList` | The order is assembled from many drags. |
+| A `DataGrid` with `selectMode: "multi"` | The set is assembled from many presses. |
+| A `DiffReview` with more than one hunk | It sends itself once the **last** hunk has a decision, so an earlier one is still only a `change`. |
+
+Everything else — `ActionCard`, a single `choice` step, a `Notice` with `actions`, a
+single-select `DataGrid`, a `RatingScale` point, a single-hunk `DiffReview` — answers itself.
+
+#### The `submit` payload
+
 The `submit` payload is a **superset**: which keys appear depends on the component that sent
 it. `values` comes from a `WizardForm`, `order` from a `SortableList`, `rowIds`/`rows` from a
-`DataGrid`, `value`/`label` from a `RatingScale`, and `decisions`/`accepted`/`rejected` from a
-`DiffReview`. Read the keys you asked for instead of assuming one shape.
+`DataGrid`, `value`/`label` from a `RatingScale`, `decisions`/`accepted`/`rejected` from a
+`DiffReview`, and `audio` from any field the human spoke into. Read the keys you asked for
+instead of assuming one shape.
 
 Both SDKs resolve a blocking `task()` call on the **first terminal event** for that taskId.
 
@@ -326,6 +356,54 @@ the human just read.
 
 `live: true` additionally emits `change` with `{ "name": ..., "value": ... }` on each edit.
 
+#### A step that is one choice answers itself
+
+When a step's only field is a `choice`, pressing an option records it and moves straight on:
+to the next step, or out as the `submit` above when it was the last one. There is no `Next` or
+`Submit` to press afterwards, and the canvas says so where the button would have been.
+
+Every other step keeps its button, and `submitLabel` names it. That is the whole rule: a
+question is answered either by a press or by words, and only the second kind has anything left
+to confirm.
+
+#### Voice — when the question needs words
+
+A `text` or `textarea` field is the one place AuraUI asks a human to type, so it is the one
+place it offers to listen instead. The canvas draws a **Speak** button beside the field label
+and fills the field with what it hears. The human can still edit the result — a transcript is
+a draft, and they can see it.
+
+What the button does depends on the webview, and AuraUI does not paper over the difference:
+
+| Webview | What Speak does |
+| --- | --- |
+| Ships a speech recognizer (Chromium, Safari) | Words stream into the field as the human speaks. |
+| Can record but cannot recognize (Tauri's WebKitGTK) | Records the take. It is transcribed through the endpoint below when one is configured, and sent as audio either way. |
+| Neither | No button is drawn: a control that cannot work is worse than no control. |
+
+**The audio is the answer; the transcript is a bonus on top of it.** Not every spoken answer is
+a sentence — *hum the tune*, *say it with the inflection you heard*, *read this script so we
+have a voice track* — so a recording is sent alongside the words rather than replaced by them:
+
+```json
+{ "component": "WizardForm",
+  "values": { "description": "the spinner never resolves" },
+  "audio": { "description": { "mime": "audio/webm;codecs=opus", "durationMs": 4120,
+                              "data": "GkXfo59Ch…" } },
+  "steps": [ … ] }
+```
+
+`audio` is keyed by field name and appears only for the fields the human actually spoke into,
+so a typed answer and a dictated one are distinguishable without decoding anything. `data` is
+base64 with no `data:` prefix. One clip is capped at about ninety seconds; a longer take is
+still transcribed, and only the audio is dropped, with the canvas saying why.
+
+To point the desktop app at a transcriber, set `VITE_AURAUI_STT_URL` at build time, or
+`localStorage["auraui.stt.url"]` at runtime, to any OpenAI-compatible
+`/v1/audio/transcriptions` endpoint, and `VITE_AURAUI_STT_MODEL` to name the model (default
+`whisper-1`). Leaving both unset is supported: with no recognizer and no transcriber, the
+canvas records, sends the audio, and says plainly that it could not write it down.
+
 ### SortableList — put these in order
 
 ```json
@@ -350,17 +428,23 @@ it is built. Submit emits:
                { "key": "verdict", "header": "Verdict", "type": "badge" } ],
   "rows": [ { "id": "smoke-8841", "run": "smoke-8841", "delta": "+318%", "verdict": "regressed" } ],
   "rowKey": "id", "selectMode": "single", "pageSize": 50,
-  "filterable": true, "sortable": true, "submitLabel": "Bisect this run",
+  "filterable": true, "sortable": true,
   "emptyMessage": "No rows." }
 ```
 
 `type` ∈ `text | number | date | badge | mono`. `selectMode` ∈ `none | single | multi`.
 
-- Selection emits non-terminal `select` with `{ "rowIds": [...], "rows": [...] }` on every
-  change, so an agent can watch a choice settle.
+- **`single` answers on the press.** Pressing a row emits `submit` with
+  `{ "component": "DataGrid", "rowIds": ["smoke-8841"], "rows": [ … ] }` and the question is
+  over — there is no submit button to reach for, and `submitLabel` is ignored. Pressing the
+  row that is already chosen takes the choice back and emits the non-terminal `select`
+  instead, so a mis-click costs nothing.
+- **`multi` keeps its button**, and keeps `submitLabel`. Assembling a set is not one press, and
+  only the human knows when the set is complete.
+- In either mode, selection changes emit non-terminal `select` with
+  `{ "rowIds": [...], "rows": [...] }`, so an agent can watch a choice settle before it is sent.
 - Sorting sorts locally **and** emits `sort` with `{ "key": ..., "direction": "asc|desc|none" }`,
   because the agent may hold the authoritative ordering and want to re-sort its own data.
-- Only the submit button emits `submit` with `{ "component": "DataGrid", "rowIds": [...], "rows": [...] }`.
 
 Display never rewrites your values: a `number` column sorts `"+318%"` numerically but still
 prints `+318%`.
@@ -412,18 +496,23 @@ you want the same card to keep going, or send a new task to continue the convers
 { "min": 1, "max": 5,
   "labels": ["Fine", "Annoying", "Degraded", "Blocking", "Everything is down"],
   "legend": { "low": "not urgent", "high": "drop everything" },
-  "defaultValue": 3, "submitLabel": "Send severity",
+  "defaultValue": 3,
   "help": "I will page someone at 4 and above." }
 ```
 
 There is **no slider, no star rating and no dropdown.** The scale is a row of buttons with
 the numbers on them, so every point is visible at once, reachable from the keyboard, and the
-whole question is answered in one press. Pressing a point emits non-terminal `change` with
-`{ "name": "value", "value": 4 }`; the submit button emits:
+whole question is answered in one press.
+
+**The press is the answer.** Pressing a point emits terminal `submit` immediately:
 
 ```json
 { "component": "RatingScale", "value": 4, "label": "Blocking", "min": 1, "max": 5 }
 ```
+
+There is no `submitLabel` and no `change`: there is no button to label, and no window in which
+the human is still deciding, so reporting one would describe a state that never existed. The
+scale becomes a receipt for the point that was pressed.
 
 | Field | Required | Meaning |
 | --- | --- | --- |
@@ -431,7 +520,7 @@ whole question is answered in one press. Pressing a point emits non-terminal `ch
 | `min` | no | Lowest point. Default `1`. |
 | `labels` | no | Exactly `max - min + 1` non-empty strings, one per point. |
 | `legend` | no | `{ "low": …, "high": … }`, the words at the two ends. |
-| `defaultValue` | no | A point highlighted up front, still requiring the submit. |
+| `defaultValue` | no | A point highlighted up front. A hint about where to start, never an answer. |
 
 `label` in the answer is the chosen point's `labels` entry, and is only present when the
 agent supplied one. AuraUI never invents what a number means.
@@ -439,7 +528,7 @@ agent supplied one. AuraUI never invents what a number means.
 ### DiffReview — accept or reject each hunk
 
 ```json
-{ "title": "cart-reducer.ts — 2 hunks", "submitLabel": "Apply the accepted hunks",
+{ "title": "cart-reducer.ts — 1 hunk",
   "hunks": [
     { "id": "h1", "header": "@@ -12,7 +12,7 @@",
       "lines": [ { "kind": "context", "text": "export function cartReducer(state, action) {" },
@@ -455,10 +544,15 @@ the line.
 computes a diff itself — the same rule as charts, where the agent brings the query and the
 rows and the renderer only draws them.
 
-Every hunk needs a decision before the review can be submitted, and a decision is made by
-pressing one of two buttons per hunk (`Accept` / `Reject`). There is no checkbox to tick and
-no "select all", on purpose: the human has to look at each hunk and choose. Each decision
-emits non-terminal `change` with `{ "name": "h1", "value": "accept" }`. Submit emits:
+A decision is made by pressing one of two buttons per hunk (`Accept` / `Reject`). There is no
+checkbox to tick and no "select all", on purpose: the human has to look at each hunk and
+choose.
+
+**The decision that settles the last open hunk sends the review.** There is no `submitLabel`
+and no separate submit button, so a card carrying one hunk — which is the shape you should be
+sending, since one card is one question — is answered end to end by a single press. A deciding
+press that still leaves hunks open emits non-terminal `change` with
+`{ "name": "h1", "value": "accept" }`; the press that closes the review emits:
 
 ```json
 { "component": "DiffReview",
@@ -468,8 +562,11 @@ emits non-terminal `change` with `{ "name": "h1", "value": "accept" }`. Submit e
 
 `accepted` and `rejected` list hunk ids in the order the hunks were sent, so an agent can
 apply them without re-deriving the order from the id map. Hunks must be a non-empty array and
-every hunk needs a non-empty `id` and at least one line; a hunk with no decision blocks the
-submit rather than being sent as undecided.
+every hunk needs a non-empty `id` and at least one line.
+
+Send **one hunk per card**. Because the review cannot be sent until every hunk it carries has
+a decision, a card with two hunks is two questions wearing one card, and the human pays for
+that with a second press.
 
 ### Unknown components
 
@@ -488,10 +585,8 @@ compile, the canvas draws the compiler error in the card instead of an empty box
                                {"type":"ack","taskId":"triage","status":"rendered"}
                                {"type":"event","taskId":"triage","event":"ready","payload":{"component":"ActionCard"},"seq":1,"at":…}
                                {"type":"event","taskId":"triage","event":"action","payload":{"actionId":"investigate","label":"Investigate","source":"ActionCard"},"seq":2,"at":…}
-{"type":"task","taskId":"anomaly","component":"DataGrid", … }
-                               {"type":"event","taskId":"anomaly","event":"select","payload":{"rowIds":["smoke-8841"],"rows":[…]}, …}   // non-terminal
-{"type":"resolve","taskId":"anomaly","reason":"selection is the answer"}
-                               {"type":"ack","taskId":"anomaly","status":"resolved"}
+{"type":"task","taskId":"anomaly","component":"DataGrid","props":{"selectMode":"single", …}}
+                               {"type":"event","taskId":"anomaly","event":"submit","payload":{"component":"DataGrid","rowIds":["smoke-8841"],"rows":[…]},"seq":3,"at":…}   // one press, and the question is over
 ```
 
 ## 6. Security and scope
@@ -534,9 +629,11 @@ old card rather than stacking a second one.
 | Headless bridge, no GUI | `npm run bridge` |
 | Headless, tasks answer themselves | `cargo run --manifest-path src-tauri/Cargo.toml --bin auraui-bridge -- --auto-answer` |
 
-Environment: `AURAUI_HOST` (default `127.0.0.1`), `AURAUI_PORT` (default `9090`).
+Environment: `AURAUI_HOST` (default `127.0.0.1`), `AURAUI_PORT` (default `9090`). The canvas
+also reads `VITE_AURAUI_STT_URL` and `VITE_AURAUI_STT_MODEL` **at build time** for voice
+transcription; see the voice section under `WizardForm`. Leaving both unset is supported.
 
 Run `python3 examples/demo_agent.py` or `node examples/demo-agent.mjs` for a full walkthrough
-of all eight component kinds against a live bridge. Each card asks one question: the
-incident report is a run of single-question cards, and the patch is reviewed one hunk at a
-time.
+of all eight component kinds against a live bridge. Each card asks one question and most of
+them are answered by a single press: the incident report is a run of single-question cards,
+and the patch is reviewed one hunk at a time.

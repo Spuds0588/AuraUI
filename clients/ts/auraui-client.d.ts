@@ -244,9 +244,8 @@ export interface RatingScaleProps {
   labels?: string[];
   /** Names the two ends, as in `{ low: "not urgent", high: "drop everything" }`. */
   legend?: { low?: string; high?: string };
-  /** A point highlighted up front, not yet submitted. */
+  /** A point highlighted up front. A hint about where to start, never an answer. */
   defaultValue?: number;
-  submitLabel?: string;
   help?: string;
 }
 
@@ -268,14 +267,17 @@ export interface DiffHunk {
  * "Accept this part of my change, or not."
  *
  * You split your own diff into hunks and mark each line; the canvas renders what it is given
- * and never computes a diff of its own. Every hunk needs a decision before the review can be
- * submitted, and each one is made by pressing a button — there is no checkbox anywhere.
+ * and never computes a diff of its own. Every hunk needs a decision, and each one is made by
+ * pressing a button — there is no checkbox anywhere.
+ *
+ * The decision *is* the submit: the press that settles the last open hunk sends the review, so
+ * a card carrying one hunk is answered in a single press. Send one hunk per card and the whole
+ * review is a run of one-press questions.
  */
 export interface DiffReviewProps {
   hunks: DiffHunk[];
   /** Text above the hunk list, for a summary like "3 files, 2 risky hunks". */
   title?: string;
-  submitLabel?: string;
   footnote?: string;
 }
 
@@ -513,7 +515,6 @@ export declare function ratingScale(
     labels?: string[];
     legend?: { low?: string; high?: string };
     defaultValue?: number;
-    submitLabel?: string;
     help?: string;
   },
 ): RatingScaleProps;
@@ -521,7 +522,7 @@ export declare function ratingScale(
 /** Rejects an empty `hunks` list, a hunk with no `id` or no lines, and a line with a bad `kind`. */
 export declare function diffReview(
   hunks: DiffHunk[],
-  extra?: { title?: string; submitLabel?: string; footnote?: string },
+  extra?: { title?: string; footnote?: string },
 ): DiffReviewProps;
 
 export declare const components: {

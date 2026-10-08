@@ -337,14 +337,14 @@ def rating_scale(
     labels: Optional[Sequence[str]] = None,
     legend: Optional[Dict[str, str]] = None,
     default_value: Optional[int] = None,
-    submit_label: Optional[str] = None,
     help: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Props for RatingScale: one bounded scale, answered by pressing a single point.
 
     AuraUI has no slider, no star rating and no dropdown, so a scale is a row of buttons with
-    the numbers on them. Every point is on screen and reachable by keyboard, and the whole
-    question is answered in one press.
+    the numbers on them. Every point is on screen and reachable by keyboard, and the press is
+    the answer: nothing is sent until the human presses, and nothing is asked afterwards.
+    There is no label to give a confirm button because there is no confirm button.
 
     The agent owns the words: ``labels`` names each point and ``legend`` names the two ends.
     AuraUI never invents "1 = terrible".
@@ -384,7 +384,6 @@ def rating_scale(
             "labels": labels,
             "legend": legend,
             "defaultValue": default_value,
-            "submitLabel": submit_label,
             "help": help,
         }
     )
@@ -394,14 +393,16 @@ def diff_review(
     hunks: Sequence[Dict[str, Any]],
     *,
     title: Optional[str] = None,
-    submit_label: Optional[str] = None,
     footnote: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Props for DiffReview: "accept this part of my change, or not".
 
-    Every hunk needs a decision before the review can be submitted, and each one is made by
-    pressing a button per hunk — there is no checkbox to tick, which is the point: the human
-    has to look at each hunk and choose.
+    Every hunk needs a decision, and each one is made by pressing a button per hunk — there is
+    no checkbox to tick, which is the point: the human has to look at each hunk and choose.
+
+    The decision is also the submit. The press that settles the last open hunk sends the
+    review, so one hunk on a card is one press end to end — which is why the examples send one
+    hunk per card rather than a wall of decisions.
     """
     _require_items(hunks, "diff_review hunks")
     for index, hunk in enumerate(hunks):
@@ -422,7 +423,6 @@ def diff_review(
         {
             "hunks": list(hunks),
             "title": title,
-            "submitLabel": submit_label,
             "footnote": footnote,
         }
     )

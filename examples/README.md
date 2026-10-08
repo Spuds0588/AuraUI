@@ -50,11 +50,18 @@ controls how the script exits, not whether it asks.
 Every card asks exactly one question. Where a real report would be one long form, the
 scripts ask a run of single-question cards instead.
 
+Most of them are also answered by a single press: making the choice, picking the row, marking
+the point on the scale and deciding the hunk are each what sends the answer, and none of them
+follows that with a button asking you to confirm it. The two places worth a second press are
+the ones that genuinely cannot finish on one — the incident description, which needs typing
+(and offers a Speak button for it), and the rollout order, which is several drags before it is
+one answer.
+
 | Step | Component | The question |
 | --- | --- | --- |
 | 1 | `ActionCard` | A deploy failed twice on staging. Investigate, roll back, or defer? |
-| 2 | `ActionCard` / `WizardForm` | The incident interview, one question per card: where it broke, what it looked like, how urgent it is, whether to page. |
-| 3 | `DataGrid` | Which of six anomaly records best explains the failure? |
+| 2 | `ActionCard` / `WizardForm` | The incident interview, one question per card: where it broke, what it looked like, how urgent it is, whether to page. The one that needs typing also offers a Speak button. |
+| 3 | `DataGrid` | Which of six anomaly records best explains the failure? Press the row; that press is the answer. |
 | 4 | `SortableList` | Put the five rollout steps back in the safe order. |
 | 5 | `InteractiveChart` | Q3 revenue by region; click a bar to drill down. |
 | 6 | `RatingScale` | How confident are you in shipping the release, 1 to 5? |

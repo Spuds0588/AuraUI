@@ -56,13 +56,20 @@ export const Label = React.forwardRef<
 ));
 Label.displayName = "Label";
 
-/** Label + control + help/error, so every field in a form lines up the same way. */
+/**
+ * Label + control + help/error, so every field in a form lines up the same way.
+ *
+ * `action` is the slot for the one control that belongs *beside the question* rather than in
+ * the flow below it. A voice button is the reason it exists: it answers the same field, so
+ * putting it under the box like another input would read as a second thing to fill in.
+ */
 export function FieldShell({
   id,
   label,
   help,
   error,
   required,
+  action,
   children,
   className,
 }: {
@@ -71,15 +78,19 @@ export function FieldShell({
   help?: string;
   error?: string;
   required?: boolean;
+  action?: React.ReactNode;
   children: React.ReactNode;
   className?: string;
 }) {
   return (
     <div className={cn("flex flex-col gap-2", className)}>
-      <Label htmlFor={id}>
-        {label}
-        {required ? <span className="ml-0.5 text-destructive">*</span> : null}
-      </Label>
+      <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1.5">
+        <Label htmlFor={id}>
+          {label}
+          {required ? <span className="ml-0.5 text-destructive">*</span> : null}
+        </Label>
+        {action}
+      </div>
       {children}
       {error ? (
         <p className="text-[11px] leading-relaxed text-destructive">{error}</p>

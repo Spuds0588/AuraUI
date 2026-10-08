@@ -213,6 +213,56 @@ fn auraui_set_overlay(app: tauri::AppHandle, active: bool) -> Result<(), String>
 }
 
 /* ------------------------------------------------------------------ *
+ * Microphone
+ * ------------------------------------------------------------------ */
+
+/// Let the canvas open the microphone, and nothing else.
+///
+/// WebKitGTK never prompts for `getUserMedia`: it hands every request to the embedding
+/// application and *denies* it unless that application answers the signal. Leave this out and
+/// the voice button is a control that looks live and does nothing, which is worse than not
+/// drawing it. So the request is answered here.
+///
+/// Microphone only, and audio only. The canvas has no camera, no location and no use for a
+/// notification, so those requests are left to WebKit's own default rather than answered by
+/// an application that was never asked. A window that says yes to everything is not one to
+/// leave running on a desktop.
+#[cfg(target_os = "linux")]
+fn allow_microphone_requests(window: &tauri::WebviewWindow) {
+    use webkit2gtk::glib::prelude::Cast;
+    use webkit2gtk::{
+        PermissionRequestExt, UserMediaPermissionRequest, UserMediaPermissionRequestExt,
+        WebViewExt,
+    };
+
+    let attached = window.with_webview(|webview| {
+        webview.inner().connect_permission_request(|_, request| {
+            let Some(media) = request.downcast_ref::<UserMediaPermissionRequest>() else {
+                // Some other kind of request. Not ours to answer.
+                return false;
+            };
+
+            if media.is_for_audio_device() && !media.is_for_video_device() {
+                media.allow();
+                log("voice: microphone allowed for the canvas");
+            } else {
+                media.deny();
+                log_error("voice: refused a media request that was not microphone-only");
+            }
+            // Handled either way, so WebKit does not fall back to its own denial for the
+            // requests we deliberately allowed.
+            true
+        });
+    });
+
+    if let Err(e) = attached {
+        log_error(format!(
+            "voice: could not reach the webview to allow the microphone: {e}"
+        ));
+    }
+}
+
+/* ------------------------------------------------------------------ *
  * Entry point
  * ------------------------------------------------------------------ */
 
@@ -242,6 +292,12 @@ pub fn run() {
                 if let Err(e) = window.set_always_on_top(true) {
                     overlay_problem(format!("could not start on top: {e}"));
                 }
+
+                // The voice button on a question that needs words. WebKit will not open the
+                // microphone until the app answers its permission signal, and the answer has
+                // to be installed before the first `getUserMedia` call rather than after.
+                #[cfg(target_os = "linux")]
+                allow_microphone_requests(&window);
             }
 
             let attached = state.attached.clone();

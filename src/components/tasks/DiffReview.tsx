@@ -16,6 +16,11 @@ import { cn } from "@/lib/utils";
  * every other question in AuraUI. The decision is written on the button itself, so the state
  * of the review is legible as a column of words rather than a column of tick boxes.
  *
+ * The review sends itself. Accept and Reject *are* the answer, so the press that decides the
+ * last open hunk submits the review, and a card carrying a single hunk — the usual case — is
+ * one press end to end. Asking for one more press to confirm a decision the human just made
+ * would make a one-click answer into two, which is the thing this canvas exists to avoid.
+ *
  * Colour is doing real work on the lines themselves (green added, red removed), which is the
  * one place in this canvas where a hue carries meaning. It is never the only carrier: every
  * line also opens with `+`, `−` or a space, and every one of those is spelled out for a
@@ -23,8 +28,6 @@ import { cn } from "@/lib/utils";
  */
 
 type Decision = "accept" | "reject";
-
-const FALLBACK_SUBMIT = "Submit review";
 
 const LINE_CLASS: Record<DiffLine["kind"], string> = {
   context: "text-muted-foreground",
@@ -71,7 +74,6 @@ export default function DiffReview({
   const [decisions, setDecisions] = useState<Record<string, Decision>>({});
   const [sent, setSent] = useState<Record<string, Decision> | null>(null);
   const locked = resolved || sent !== null;
-  const submitLabel = props?.submitLabel ?? FALLBACK_SUBMIT;
 
   if (hunks.length === 0) {
     return (
@@ -81,24 +83,38 @@ export default function DiffReview({
     );
   }
 
+  const send = (final: Record<string, Decision>) => {
+    const accepted = hunks.filter((h) => final[h.id] === "accept").map((h) => h.id);
+    const rejected = hunks.filter((h) => final[h.id] === "reject").map((h) => h.id);
+    setSent(final);
+    respond("submit", {
+      component: "DiffReview",
+      decisions: final,
+      accepted,
+      rejected,
+    });
+  };
+
   const decide = (id: string, choice: Decision) => {
     if (locked) return;
-    setDecisions((current) => ({ ...current, [id]: choice }));
-    // Non-terminal, so an agent can watch the review filling up rather than only seeing the
-    // finished verdict. `name` is the hunk id, which is what the answer is keyed by.
+    const next = { ...decisions, [id]: choice };
+    setDecisions(next);
+
+    // The deciding press is the answer. Once every hunk has one, the review is finished and
+    // sends itself — no `change` first, because there is no longer a moment where the human
+    // is still making up their mind about it.
+    if (hunks.every((hunk) => next[hunk.id] !== undefined)) {
+      send(next);
+      return;
+    }
+
+    // Still hunks to go: a non-terminal signal, so an agent can watch the review fill up
+    // rather than only seeing the finished verdict. `name` is the hunk id, which is what the
+    // answer is keyed by.
     respond("change", { name: id, value: choice });
   };
 
   const undecided = hunks.filter((hunk) => decisions[hunk.id] === undefined);
-  const canSubmit = undecided.length === 0;
-
-  const submit = () => {
-    if (locked || !canSubmit) return;
-    const accepted = hunks.filter((h) => decisions[h.id] === "accept").map((h) => h.id);
-    const rejected = hunks.filter((h) => decisions[h.id] === "reject").map((h) => h.id);
-    setSent(decisions);
-    respond("submit", { component: "DiffReview", decisions, accepted, rejected });
-  };
 
   return (
     <div className="flex flex-col gap-4">
@@ -165,18 +181,17 @@ export default function DiffReview({
         })}
       </ol>
 
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <p className="text-[11px] leading-relaxed text-muted-foreground">
-          {canSubmit
+      <p className="text-[11px] leading-relaxed text-muted-foreground">
+        {locked
+          ? "Review sent."
+          : undecided.length === 0
             ? "Every hunk has a decision."
-            : `${undecided.length} hunk${undecided.length === 1 ? "" : "s"} still need${
-                undecided.length === 1 ? "s" : ""
-              } a decision.`}
-        </p>
-        <Button variant="primary" size="sm" onClick={submit} disabled={locked || !canSubmit}>
-          {submitLabel}
-        </Button>
-      </div>
+            : hunks.length === 1
+              ? "Accept or reject it. That press sends the review."
+              : `${undecided.length} hunk${
+                  undecided.length === 1 ? "" : "s"
+                } left. The review sends itself as soon as the last one has a decision.`}
+      </p>
 
       {props?.footnote ? (
         <p className="text-[11px] leading-relaxed text-muted-foreground">{props.footnote}</p>

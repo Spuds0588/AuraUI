@@ -23,6 +23,11 @@ import { cn, formatNumber } from "@/lib/utils";
  * A multi-select grid marks rows with real buttons, not checkboxes: the target is the whole
  * cell, it reports its own state through `aria-pressed`, and the label says what pressing it
  * does. AuraUI has no checkbox anywhere, so there is no smaller thing to aim at.
+ *
+ * A single-select grid answers on the press. The row *is* the choice, exactly like an option
+ * in an ActionCard, so reaching it and then reaching for a submit button would make a
+ * one-click answer into two. A multi-select keeps its button because the human is assembling
+ * a set and only they know when it is complete.
  */
 
 /** The tick inside a row toggle. Filled when the row is part of the answer. */
@@ -96,6 +101,7 @@ export default function DataGrid({
   const [direction, setDirection] = useState<SortDirection>("none");
   const [page, setPage] = useState(1);
   const [selected, setSelected] = useState<string[]>([]);
+  const [sent, setSent] = useState(false);
 
   const keyOf = useCallback(
     (row: Row, index: number) => {
@@ -146,12 +152,10 @@ export default function DataGrid({
   }, [query, rows]);
 
   const selectedSet = useMemo(() => new Set(selected), [selected]);
-  const selectedRows = useMemo(
-    () => selected.map((key) => byKey.get(key)).filter((row): row is Row => row !== undefined),
-    [byKey, selected],
-  );
 
-  const interactive = selectMode !== "none" && !resolved;
+  // `sent` is local, so the grid locks the moment the answer goes out instead of staying
+  // pressable until the agent's `resolve` comes back over the socket.
+  const interactive = selectMode !== "none" && !resolved && !sent;
 
   const commitSelection = (nextIds: string[]) => {
     setSelected(nextIds);
@@ -165,7 +169,15 @@ export default function DataGrid({
   const toggleRow = (key: string) => {
     if (!interactive) return;
     if (selectMode === "single") {
-      commitSelection(selectedSet.has(key) ? [] : [key]);
+      // Pressing the row that is already chosen takes the choice back; pressing any other
+      // row answers the question outright. Nothing here needs typing, so there is nothing
+      // left for a second button to confirm.
+      if (selectedSet.has(key)) {
+        commitSelection([]);
+        return;
+      }
+      setSelected([key]);
+      submitRows([key]);
       return;
     }
     const next = selectedSet.has(key)
@@ -205,9 +217,14 @@ export default function DataGrid({
     respond("sort", { key, direction: nextDirection });
   };
 
-  const submit = () => {
-    if (!interactive) return;
-    respond("submit", { component: "DataGrid", rowIds: selected, rows: selectedRows });
+  /** Send the chosen rows and end the question. The one place a grid answers terminally. */
+  const submitRows = (ids: string[]) => {
+    if (resolved) return;
+    const rowsForIds = ids
+      .map((key) => byKey.get(key))
+      .filter((row): row is Row => row !== undefined);
+    setSent(true);
+    respond("submit", { component: "DataGrid", rowIds: ids, rows: rowsForIds });
   };
 
   const columnCount = columns.length + (selectMode === "multi" ? 1 : 0);
@@ -419,15 +436,24 @@ export default function DataGrid({
         </div>
       ) : null}
 
-      {resolved ? (
+      {resolved || sent ? (
         <p className="text-[11px] text-muted-foreground">
           {selected.length > 0
             ? `You submitted: ${selected.join(", ")}`
             : "Answered without a row selected."}
         </p>
+      ) : selectMode === "single" ? (
+        <p className="text-[11px] text-muted-foreground">
+          Press the row you mean. That press is the answer.
+        </p>
       ) : interactive ? (
         <div className="flex justify-end">
-          <Button variant="primary" size="sm" onClick={submit} disabled={selected.length === 0}>
+          <Button
+            variant="primary"
+            size="sm"
+            onClick={() => submitRows(selected)}
+            disabled={selected.length === 0}
+          >
             {submitLabel}
           </Button>
         </div>

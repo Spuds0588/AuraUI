@@ -241,12 +241,15 @@ def run(agent: Agent) -> None:
                             "textarea",
                             placeholder="The second deploy timed out during the health check...",
                             required=True,
-                            help="Your words are quoted in the incident report.",
+                            # The one question here that needs typing, so it also offers the
+                            # voice button: AuraUI draws a Speak control on every text and
+                            # textarea field it can.
+                            help="Your words are quoted in the incident report. Type it, or press Speak.",
                         ),
                     ],
                 ),
             ],
-            submit_label="Next",
+            submit_label="Send this answer",
         ),
     )
 
@@ -303,11 +306,11 @@ def run(agent: Agent) -> None:
                 c.column("window", "Window", "badge"),
             ],
             ANOMALIES,
+            # One row is the answer: pressing it submits, so there is no second button.
             row_key="id",
             select_mode="single",
             page_size=6,
             sortable=True,
-            submit_label="Use this record",
         ),
     )
     selected = (picked.get("payload") or {}).get("rowIds") or []
@@ -365,8 +368,8 @@ def run(agent: Agent) -> None:
             ],
             legend={"low": "confident", "high": "worried"},
             default_value=3,
-            submit_label="Send my confidence",
-            help="One press. There is no slider to drag and no dropdown to open.",
+            # No submit label: pressing a point sends it, so the scale is one press.
+            help="One press answers it. There is no slider to drag and no dropdown to open.",
         ),
     )
     confidence = (rated.get("payload") or {}).get("value")
@@ -388,8 +391,7 @@ def run(agent: Agent) -> None:
             props=c.diff_review(
                 [hunk],
                 title=hunk.get("header"),
-                submit_label="Decide this hunk",
-                footnote="This hunk needs a decision before I touch the branch.",
+                footnote="Accept or reject it and I will apply exactly that.",
             ),
         )
         accepted.extend((review.get("payload") or {}).get("accepted") or [])

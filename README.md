@@ -20,6 +20,11 @@ AuraUI is not a window you keep open, and not a chat log. It is an overlay:
   leaving it visible, and the card is the only thing asking for your attention.
 - **One question at a time.** Everything else the agent asks waits in a queue, shown as a
   single quiet line, and is answered in the order it was asked.
+- **One press answers it.** A choice, a row in a table, a point on a scale and an
+  accept-or-reject on a diff are all sent by the press that makes them. Only a question that
+  genuinely needs words keeps a button, because only you know when you have finished typing.
+- Those words can be **spoken**. A field that wants an explanation offers a Speak button, and
+  the recording travels back with the answer alongside whatever was written down.
 - Answering gets a short receipt — enough to know the answer left — and then the next
   question takes its place.
 - If the agent disconnects while a question is open, the card says so, goes read-only, and
@@ -49,8 +54,33 @@ Eight component kinds, all verified end to end:
 Choosing is always a button. There is deliberately no checkbox, radio button or dropdown
 anywhere in the canvas, and the bridge refuses a chart spec that would draw one.
 
+And choosing is *one* button. The press that makes a choice is the answer — `ActionCard`,
+`Notice` with actions, a single-select `DataGrid`, a `RatingScale` point and a single-hunk
+`DiffReview` all send themselves on that press. A button asking you to confirm the thing you
+just clicked turns one decision into two, so there is not one.
+
 Plus `note` for narration, `notify` for toasts, and `ack` so an agent always knows whether a
 window is actually showing its question (`rendered`) or nobody is looking (`queued`).
+
+### Answering out loud
+
+A question that needs an explanation is the only kind that asks for typing, so it is the only
+kind that offers a **Speak** button. What that button can do depends on the engine drawing the
+canvas, and AuraUI does not pretend otherwise:
+
+- Where the engine has a speech recognizer (Chrome, Safari), your words stream into the field
+  as you talk, and you can edit them before sending.
+- In the Tauri desktop window on Linux, WebKitGTK has never implemented one — so the canvas
+  records the take instead. Point `VITE_AURAUI_STT_URL` at any OpenAI-compatible
+  `/v1/audio/transcriptions` endpoint and it will be written down; leave it unset and the
+  recording is sent as audio, with the canvas saying so.
+- Where there is no microphone and no recognizer, no button is drawn at all. A control that
+  cannot work is worse than no control.
+
+Either way the audio travels *with* the answer rather than instead of it. Some answers only
+exist as sound — a tune hummed because the words for it are the point, a line read with the
+intonation you actually heard, a script read for a voice track — and those come back as a clip
+the agent can keep.
 
 ## Requirements
 

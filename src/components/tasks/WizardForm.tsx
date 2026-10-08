@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import {
   Badge,
@@ -7,10 +7,12 @@ import {
   type ChoiceOption,
   FieldShell,
   Input,
+  MicButton,
   Textarea,
 } from "@/components/ui";
 import type { TaskComponentProps } from "@/components/renderer/types";
-import type { Field, WizardFormProps, WizardStep } from "@/lib/protocol";
+import type { AudioClip, Field, WizardFormProps, WizardStep } from "@/lib/protocol";
+import { appendSpeech, useVoiceInput } from "@/lib/voice";
 import { cn } from "@/lib/utils";
 
 type Values = Record<string, unknown>;
@@ -24,6 +26,14 @@ type Errors = Record<string, string>;
  * reported rather than typed away.
  */
 const FIELD_KINDS = new Set<string>(["text", "textarea", "number", "date", "choice", "multi"]);
+
+/**
+ * The fields a person can answer by talking.
+ *
+ * The kinds nobody can dictate: a date or a number read aloud has to be interpreted before it
+ * can be trusted, and an option list is one press away anyway. Everything else here is words.
+ */
+const SPEAKABLE_KINDS = new Set<string>(["text", "textarea"]);
 
 function seedValues(steps: WizardStep[]): Values {
   const values: Values = {};
@@ -107,6 +117,23 @@ function validateStep(step: WizardStep, values: Values): Errors {
   return errors;
 }
 
+/**
+ * A step the human can answer with one press.
+ *
+ * True only for a step that is a *single* `choice`: one question, one press, and no second
+ * button to reach for afterwards. Two things deliberately keep their own confirm. A step with
+ * several fields is several questions and the canvas cannot know which press finished them,
+ * and a `multi` is a set the human is still assembling — picking a second option is not the
+ * same gesture as taking the first one back.
+ *
+ * Nothing here needs typing, so there is nothing a confirm button could add. Only a question
+ * that needs words keeps one.
+ */
+function answersInOnePress(step: WizardStep | undefined): boolean {
+  const fields = step?.fields ?? [];
+  return fields.length === 1 && fields[0].type === "choice";
+}
+
 function displayValue(field: Field, value: unknown): string {
   if (field.type === "choice" || field.type === "multi") {
     // Read back the labels the human actually clicked. A receipt saying "sev_1" would be
@@ -157,6 +184,31 @@ export default function WizardForm({
   const locked = submitted || resolved;
   const live = props?.live === true;
 
+  // One microphone for the card, aimed at whichever field asked for it. A card asks one
+  // question, so there is never a second take in flight to keep track of.
+  const [voiceField, setVoiceField] = useState<string | null>(null);
+  const voiceFieldRef = useRef<string | null>(null);
+  voiceFieldRef.current = voiceField;
+  const [clips, setClips] = useState<Record<string, AudioClip>>({});
+
+  const voice = useVoiceInput({
+    // Settled words land in the field as they arrive, so the human watches the answer being
+    // written and can fix it. The microphone never silently replaces what they typed.
+    onAppend: (phrase) => {
+      const name = voiceFieldRef.current;
+      if (name === null) return;
+      setValues((current) => ({ ...current, [name]: appendSpeech(textOf(current[name]), phrase) }));
+    },
+    // The audio rides along with the answer, so a question that only makes sense as sound —
+    // hummed, inflected, read aloud — still comes back as the thing the agent asked for.
+    onTake: (take) => {
+      const name = voiceFieldRef.current;
+      if (name === null || !take.clip) return;
+      const clip = take.clip;
+      setClips((current) => ({ ...current, [name]: clip }));
+    },
+  });
+
   const setValue = useCallback(
     (field: Field, value: unknown) => {
       setValues((current) => ({ ...current, [field.name]: value }));
@@ -179,7 +231,7 @@ export default function WizardForm({
    * they render the same control with the same hit target and the same keyboard story. The
    * toggle rule below is where that difference lives, and nowhere else.
    */
-  const choiceControl = (field: Field, value: unknown, multi: boolean) => {
+  const choiceControl = (field: Field, value: unknown, multi: boolean, at: number) => {
     const options: ChoiceOption[] = field.options ?? [];
 
     if (options.length === 0) {
@@ -206,6 +258,13 @@ export default function WizardForm({
         disabled={locked}
         onToggle={(next) => {
           if (!multi) {
+            // The press is the answer when this step is the one question it looks like:
+            // it records the choice and moves on in the same gesture. No `change` on the
+            // way out — there is no longer a moment where the human is still deciding.
+            if (answersInOnePress(steps[at])) {
+              completeStep(field, next, at);
+              return;
+            }
             // Re-clicking the answer that is already on keeps it: picking again is not
             // the same thing as taking the answer back.
             setValue(field, next);
@@ -246,14 +305,36 @@ export default function WizardForm({
       );
     }
 
+    // What the voice button has to say about this field: words it is hearing right now, then
+    // whatever it could not do with the take it just finished. Both are more useful to the
+    // person than the agent's static hint, so they take its place for as long as they apply.
+    const speaking = voiceField === field.name;
+    const voiceMessage = speaking
+      ? voice.listening && voice.interim !== ""
+        ? `Hearing: “${voice.interim}”`
+        : voice.error ?? voice.notice
+      : undefined;
+
+    const mic =
+      SPEAKABLE_KINDS.has(field.type) && voice.capability !== "none" && !locked ? (
+        <MicButton
+          listening={speaking && voice.listening}
+          onClick={() => {
+            setVoiceField(field.name);
+            voice.toggle();
+          }}
+        />
+      ) : undefined;
+
     return (
       <FieldShell
         key={field.name}
         id={id}
         label={field.label}
-        help={field.help}
+        help={voiceMessage ?? field.help}
         error={error}
         required={field.required}
+        action={mic}
       >
         {field.type === "textarea" ? (
           <Textarea
@@ -265,9 +346,9 @@ export default function WizardForm({
             onChange={(event) => setValue(field, event.target.value)}
           />
         ) : field.type === "choice" ? (
-          choiceControl(field, value, false)
+          choiceControl(field, value, false, safeIndex)
         ) : field.type === "multi" ? (
-          choiceControl(field, value, true)
+          choiceControl(field, value, true, safeIndex)
         ) : field.type === "number" ? (
           <Input
             id={id}
@@ -329,6 +410,11 @@ export default function WizardForm({
                   <dd className="font-medium text-foreground/90">
                     {displayValue(field, values[field.name])}
                   </dd>
+                  {clips[field.name] ? (
+                    <dd className="text-[11px] text-muted-foreground">
+                      spoken · {Math.round(clips[field.name].durationMs / 1000)}s of audio sent
+                    </dd>
+                  ) : null}
                 </div>
               ))}
             </dl>
@@ -353,11 +439,17 @@ export default function WizardForm({
     setStepIndex(Math.max(safeIndex - 1, 0));
   };
 
-  const submit = () => {
-    // Re-check every step, not just the visible one: the human can navigate back, and the
-    // agent's rules still apply to what they already typed.
+  /**
+   * Send the form.
+   *
+   * Takes the values rather than reading them from state, because the one-press path below
+   * has an answer in hand that React has not rendered yet. Re-checks every step, not just the
+   * visible one: the human can navigate back, and the agent's rules still apply to what they
+   * already typed.
+   */
+  const submitValues = (candidate: Values) => {
     for (let index = 0; index < total; index += 1) {
-      const found = validateStep(steps[index], values);
+      const found = validateStep(steps[index], candidate);
       if (Object.keys(found).length > 0) {
         setStepIndex(index);
         setErrors(found);
@@ -372,12 +464,40 @@ export default function WizardForm({
     const perStep: Array<{ stepId: string; values: Values }> = [];
     const running: Values = {};
     for (const entry of steps) {
-      for (const field of entry.fields ?? []) running[field.name] = values[field.name];
+      for (const field of entry.fields ?? []) running[field.name] = candidate[field.name];
       perStep.push({ stepId: entry.id, values: { ...running } });
     }
 
-    respond("submit", { component: "WizardForm", values, steps: perStep });
+    respond("submit", {
+      component: "WizardForm",
+      values: candidate,
+      steps: perStep,
+      // Only the fields that were actually spoken into, so an agent can tell a typed answer
+      // from a dictated one without having to look at the audio to find out.
+      ...(Object.keys(clips).length > 0 ? { audio: clips } : {}),
+    });
   };
+
+  /** Record a one-press answer, then go on: to the next step, or out as a submitted form. */
+  const completeStep = (field: Field, value: unknown, at: number) => {
+    const candidate: Values = { ...values, [field.name]: value };
+    setValues(candidate);
+
+    const found = validateStep(steps[at], candidate);
+    if (Object.keys(found).length > 0) {
+      setErrors(found);
+      return;
+    }
+    setErrors({});
+
+    if (at >= total - 1) {
+      submitValues(candidate);
+      return;
+    }
+    setStepIndex(Math.min(at + 1, total - 1));
+  };
+
+  const onePressStep = answersInOnePress(step);
 
   return (
     <div className="flex flex-col gap-5">
@@ -430,8 +550,20 @@ export default function WizardForm({
           </Button>
         ) : null}
         <div className="ml-auto flex items-center gap-3">
-          {isLast ? (
-            <Button type="button" variant="primary" size="sm" onClick={submit} disabled={locked}>
+          {onePressStep ? (
+            // Nothing to press: the answer above is the whole interaction. Saying so beats an
+            // empty corner the human wonders about.
+            <p className="text-[11px] text-muted-foreground">
+              Press your answer to go on. There is nothing left to confirm.
+            </p>
+          ) : isLast ? (
+            <Button
+              type="button"
+              variant="primary"
+              size="sm"
+              onClick={() => submitValues(values)}
+              disabled={locked}
+            >
               {props?.submitLabel ?? "Submit"}
             </Button>
           ) : (

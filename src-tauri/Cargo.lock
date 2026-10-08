@@ -88,6 +88,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "uuid",
+ "webkit2gtk",
 ]
 
 [[package]]

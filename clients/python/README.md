@@ -121,11 +121,10 @@ c.data_grid(columns, rows, row_key=None, select_mode=None, page_size=None, filte
             sortable=None, submit_label=None, empty_message=None)
 c.interactive_chart(vega_schema, data, height=None, drillable=None, hint=None)
 
-c.rating_scale(max, min=1, labels=None, legend=None, default_value=None,
-               submit_label=None, help=None)
+c.rating_scale(max, min=1, labels=None, legend=None, default_value=None, help=None)
 c.diff_hunk(id, lines, header=None)
 c.diff_line(kind, text)
-c.diff_review(hunks, title=None, submit_label=None, footnote=None)
+c.diff_review(hunks, title=None, footnote=None)
 ```
 
 Python arguments are snake_case; the JSON on the wire stays camelCase (`defaultValue`,
@@ -134,9 +133,9 @@ Python arguments are snake_case; the JSON on the wire stays camelCase (`defaultV
 ## RatingScale: ask for a number on a scale
 
 There is no slider, star rating or dropdown in AuraUI — a scale is a row of numbered buttons,
-so every point is on screen and one press answers it. ``max`` must be 2 to 10, and ``labels``
-(when you send it) must carry exactly one label per point. You own the words: AuraUI never
-invents "1 = terrible".
+so every point is on screen and one press answers it, with nothing to confirm afterwards.
+``max`` must be 2 to 10, and ``labels`` (when you send it) must carry exactly one label per
+point. You own the words: AuraUI never invents "1 = terrible".
 
 ```python
 answer = agent.task(
@@ -147,26 +146,28 @@ answer = agent.task(
         labels=["Fine", "Annoying", "Degraded", "Blocking", "Everything is down"],
         legend={"low": "not urgent", "high": "drop everything"},
         default_value=3,
-        submit_label="Send severity",
     ),
 )
 print(answer["payload"]["value"])  # 4
 print(answer["payload"]["label"])  # "Blocking"
 ```
 
-Pressing a point emits non-terminal ``change`` with ``{"name": "value", "value": n}``; the
-submit button emits terminal ``submit`` with ``{component, value, label?, min, max}``.
+Pressing a point emits terminal ``submit`` with ``{component, value, label?, min, max}``
+straight away. There is no ``change`` and no ``submit_label``: the press is the answer, and
+there is no button for a label to be on. ``default_value`` is a hint about where to start,
+not an answer.
 
 ## DiffReview: accept or reject each hunk
 
 You split your own diff into hunks and mark every line. The canvas renders what you send and
-never computes a diff of its own, the same rule as charts. Every hunk must be decided before
-the human can submit.
+never computes a diff of its own, the same rule as charts. The decision that settles the last
+open hunk sends the review, so **send one hunk per card** and the whole review is a run of
+one-press questions.
 
 ```python
 review = agent.task(
     component="DiffReview",
-    instruction="Two hunks touch the cart reducer. Take both?",
+    instruction="One hunk touches the cart reducer. Take it?",
     props=c.diff_review(
         [
             c.diff_hunk(
@@ -178,19 +179,19 @@ review = agent.task(
                 ],
                 header="@@ -12,7 +12,7 @@",
             ),
-            c.diff_hunk("h2", [c.diff_line("add", "  if (!action.items) return state;")]),
         ],
-        title="cart-reducer.ts — 2 hunks",
-        submit_label="Apply the accepted hunks",
+        title="cart-reducer.ts — 1 hunk",
     ),
 )
 print(review["payload"]["accepted"])   # ["h1"]
-print(review["payload"]["decisions"])  # {"h1": "accept", "h2": "reject"}
+print(review["payload"]["decisions"])  # {"h1": "accept"}
 ```
 
-Each decision emits non-terminal ``change`` with ``{"name": hunk_id, "value": "accept"|"reject"}``.
-Submit emits terminal ``submit`` with ``{component, decisions, accepted, rejected}``, where
-``accepted`` and ``rejected`` hold the hunk ids in the order you sent them.
+A decision that still leaves hunks open emits non-terminal ``change`` with
+``{"name": hunk_id, "value": "accept"|"reject"}``. The press that closes the review emits
+terminal ``submit`` with ``{component, decisions, accepted, rejected}``, where ``accepted``
+and ``rejected`` hold the hunk ids in the order you sent them. There is no ``submit_label``
+and no submit button.
 
 ## Frame reference
 

@@ -1,5 +1,4 @@
 import { useMemo, useState } from "react";
-import { Button } from "@/components/ui";
 import type { TaskComponentProps } from "@/components/renderer/types";
 import type { RatingScaleProps } from "@/lib/protocol";
 import { cn } from "@/lib/utils";
@@ -12,6 +11,11 @@ import { cn } from "@/lib/utils";
  * button with its number on it, so the whole scale is visible at once, reachable by keyboard,
  * and answered in a single press.
  *
+ * One press *is* the answer. Reaching the point and then reaching for a second button to send
+ * it is two decisions where the human made one, so the press sends the rating outright and
+ * the scale becomes a receipt. There is nothing to type here, so there is nothing left to
+ * confirm; only a question that needs words keeps a button of its own.
+ *
  * The scale is deliberately **not** tinted by position the way a list of choices is. A choice
  * list is unordered, so a different hue per option says "these are different things". A scale
  * is ordered — 1 and 5 are the same kind of thing at different degrees — and a rainbow across
@@ -21,7 +25,6 @@ import { cn } from "@/lib/utils";
  * never invents what "1" means.
  */
 
-const FALLBACK_SUBMIT = "Send rating";
 /** Points drawn when an agent sends `max` the validator would have refused. */
 const FALLBACK_SPAN = 4;
 
@@ -54,7 +57,6 @@ export default function RatingScale({
   );
   const [sent, setSent] = useState<number | null>(null);
   const locked = resolved || sent !== null;
-  const submitLabel = props?.submitLabel ?? FALLBACK_SUBMIT;
   const chosenLabel = value === null ? undefined : labels[value - min];
   const legend = props?.legend;
 
@@ -66,22 +68,23 @@ export default function RatingScale({
     );
   }
 
+  /**
+   * Pressing a point answers the question and ends it.
+   *
+   * No `change` on the way: there is no window in which the human is still deciding, so
+   * reporting one would tell the agent about a state that never existed. One press, one
+   * terminal event.
+   */
   const pick = (point: number) => {
     if (locked) return;
     setValue(point);
-    // Non-terminal on purpose: an agent watching can see the number move while the human is
-    // still deciding, the same way a grid reports a selection before it is submitted.
-    respond("change", { name: "value", value: point });
-  };
-
-  const submit = () => {
-    if (locked || value === null) return;
-    setSent(value);
+    setSent(point);
+    const label = labels[point - min];
     respond("submit", {
       component: "RatingScale",
-      value,
+      value: point,
       // Only present when the agent named the points; the payload mirrors what was asked.
-      ...(chosenLabel !== undefined ? { label: chosenLabel } : {}),
+      ...(label !== undefined ? { label } : {}),
       min,
       max,
     });
@@ -140,24 +143,18 @@ export default function RatingScale({
         </div>
       ) : null}
 
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <p className="text-[11px] leading-relaxed text-muted-foreground">
-          {props?.help ??
-            (value === null
-              ? "Press a point, then send it."
+      <p className="text-[11px] leading-relaxed text-muted-foreground">
+        {props?.help ??
+          (locked
+            ? chosenLabel
+              ? `Sent ${value} — ${chosenLabel}.`
+              : `Sent ${value}.`
+            : value === null
+              ? "Press a point. That press is the answer."
               : chosenLabel
                 ? `${value} — ${chosenLabel}`
                 : `Point ${value} of ${min}–${max} selected.`)}
-        </p>
-        <Button
-          variant="primary"
-          size="sm"
-          onClick={submit}
-          disabled={locked || value === null}
-        >
-          {submitLabel}
-        </Button>
-      </div>
+      </p>
     </div>
   );
 }

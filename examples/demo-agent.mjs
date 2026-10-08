@@ -211,11 +211,13 @@ async function run(agent) {
             type: "textarea",
             placeholder: "The second deploy timed out during the health check...",
             required: true,
-            help: "Your words are quoted in the incident report.",
+            // The one question here that needs typing, so it also offers the voice button:
+            // AuraUI draws a Speak control on every text and textarea field it can.
+            help: "Your words are quoted in the incident report. Type it, or press Speak.",
           }),
         ]),
       ],
-      { submitLabel: "Next" },
+      { submitLabel: "Send this answer" },
     ),
   });
 
@@ -267,7 +269,8 @@ async function run(agent) {
         c.column("window", "Window", { type: "badge" }),
       ],
       ANOMALIES,
-      { rowKey: "id", selectMode: "single", pageSize: 6, sortable: true, submitLabel: "Use this record" },
+      // One row is the answer: pressing it submits, so there is no second button to find.
+      { rowKey: "id", selectMode: "single", pageSize: 6, sortable: true },
     ),
   });
   const selected = picked.payload?.rowIds ?? [];
@@ -316,8 +319,8 @@ async function run(agent) {
       ],
       legend: { low: "confident", high: "worried" },
       defaultValue: 3,
-      submitLabel: "Send my confidence",
-      help: "One press. There is no slider to drag and no dropdown to open.",
+      // No submit label: pressing a point sends it, so the scale is one press.
+      help: "One press answers it. There is no slider to drag and no dropdown to open.",
     }),
   });
   const confidence = rated.payload?.value;
@@ -337,8 +340,7 @@ async function run(agent) {
         "will apply exactly what you approve.",
       props: c.diffReview([PATCH_HUNKS[i]], {
         title: PATCH_HUNKS[i].header,
-        submitLabel: "Decide this hunk",
-        footnote: "This hunk needs a decision before I touch the branch.",
+        footnote: "Accept or reject it and I will apply exactly that.",
       }),
     });
     accepted.push(...(review.payload?.accepted ?? []));

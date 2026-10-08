@@ -222,6 +222,14 @@ pub struct EventFrame {
     #[serde(rename = "taskId")]
     pub task_id: String,
     pub event: EventName,
+    /// Untyped on purpose, and the one place this mirror is deliberately incomplete.
+    ///
+    /// The event name is the contract the bridge enforces; the payload is a superset whose
+    /// keys depend on the component that produced it (`values`, `order`, `rowIds`,
+    /// `value`/`label`, `decisions`/`accepted`/`rejected`, `audio`), and the canvas owns that
+    /// shape. Re-declaring it here would mean three places to keep in step for no validation
+    /// the bridge could actually perform, so `src/lib/protocol.ts` and `docs/PROTOCOL.md`
+    /// carry it and this stays a passthrough.
     pub payload: Value,
     pub seq: u64,
     /// Unix epoch milliseconds, stamped by the bridge rather than trusted from the webview.

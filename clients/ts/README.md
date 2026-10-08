@@ -112,10 +112,10 @@ c.sortableList(items, { requireAll, submitLabel })
 c.dataGrid(columns, rows, { rowKey, selectMode, pageSize, filterable, sortable, submitLabel, emptyMessage })
 c.interactiveChart(vegaSchema, data, { height, drillable, hint })
 
-c.ratingScale(max, { min, labels, legend, defaultValue, submitLabel, help })
+c.ratingScale(max, { min, labels, legend, defaultValue, help })
 c.diffHunk(id, lines, { header })
 c.diffLine(kind, text)
-c.diffReview(hunks, { title, submitLabel, footnote })
+c.diffReview(hunks, { title, footnote })
 ```
 
 A wizard field is one of `text`, `textarea`, `number`, `date`, `choice` or `multi`. `choice`
@@ -128,9 +128,9 @@ agreeing to.
 ## RatingScale: ask for a number on a scale
 
 There is no slider, star rating or dropdown in AuraUI — a scale is a row of numbered
-buttons, so every point is on screen and one press answers it. `max` must be 2 to 10, and
-`labels` (when you send it) must carry exactly one label per point. You own the words: AuraUI
-never invents "1 = terrible".
+buttons, so every point is on screen and one press answers it, with nothing to confirm
+afterwards. `max` must be 2 to 10, and `labels` (when you send it) must carry exactly one
+label per point. You own the words: AuraUI never invents "1 = terrible".
 
 ```js
 const answer = await agent.task({
@@ -140,7 +140,6 @@ const answer = await agent.task({
     labels: ["Fine", "Annoying", "Degraded", "Blocking", "Everything is down"],
     legend: { low: "not urgent", high: "drop everything" },
     defaultValue: 3,
-    submitLabel: "Send severity",
   }),
 });
 
@@ -148,19 +147,22 @@ console.log(answer.payload.value); // 4
 console.log(answer.payload.label); // "Blocking"
 ```
 
-Pressing a point emits non-terminal `change` with `{ name: "value", value }`; the submit
-button emits terminal `submit` with `{ component, value, label?, min, max }`.
+Pressing a point emits terminal `submit` with `{ component, value, label?, min, max }`
+straight away. There is no `change` and no `submitLabel`: the press is the answer, and there
+is no button for a label to be on. `defaultValue` is a hint about where to start, not an
+answer.
 
 ## DiffReview: accept or reject each hunk
 
 You split your own diff into hunks and mark every line. The canvas renders what you send and
-never computes a diff of its own, the same rule as charts. Every hunk must be decided before
-the human can submit.
+never computes a diff of its own, the same rule as charts. The decision that settles the last
+open hunk sends the review, so **send one hunk per card** and the whole review is a run of
+one-press questions.
 
 ```js
 const review = await agent.task({
   component: "DiffReview",
-  instruction: "Two hunks touch the cart reducer. Take both?",
+  instruction: "One hunk touches the cart reducer. Take it?",
   props: c.diffReview(
     [
       c.diffHunk("h1", [
@@ -168,21 +170,19 @@ const review = await agent.task({
         c.diffLine("del", "  return { ...state, items: action.items };"),
         c.diffLine("add", "  return { ...state, items: dedupe(action.items) };"),
       ], { header: "@@ -12,7 +12,7 @@" }),
-      c.diffHunk("h2", [
-        c.diffLine("add", "  if (!action.items) return state;"),
-      ]),
     ],
-    { title: "cart-reducer.ts — 2 hunks", submitLabel: "Apply the accepted hunks" },
+    { title: "cart-reducer.ts — 1 hunk" },
   ),
 });
 
-console.log(review.payload.accepted); // ["h1", "h2"]
-console.log(review.payload.decisions); // { h1: "accept", h2: "reject" }
+console.log(review.payload.accepted); // ["h1"]
+console.log(review.payload.decisions); // { h1: "accept" }
 ```
 
-Each decision emits non-terminal `change` with `{ name: hunkId, value: "accept"|"reject" }`.
-Submit emits terminal `submit` with `{ component, decisions, accepted, rejected }`, where
-`accepted` and `rejected` hold the hunk ids in the order you sent them.
+A decision that still leaves hunks open emits non-terminal `change` with
+`{ name: hunkId, value: "accept"|"reject" }`. The press that closes the review emits terminal
+`submit` with `{ component, decisions, accepted, rejected }`, where `accepted` and `rejected`
+hold the hunk ids in the order you sent them. There is no `submitLabel` and no submit button.
 
 ## Frame reference
 
