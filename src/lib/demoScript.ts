@@ -6,7 +6,7 @@ import { PROTOCOL_VERSION } from "./protocol";
  *
  * `npm run dev` in a browser has no Rust bridge and no agent, which makes the renderer
  * impossible to look at while you are working on it. This plays a realistic HITL session
- * covering all eight component kinds, and answers each interaction with the next step the
+ * covering all eleven component kinds, and answers each interaction with the next step the
  * way a real agent would. It is a development aid, never part of the desktop runtime.
  *
  * One rule shapes the whole script: **one card is one question**. A card that asks two things
@@ -324,6 +324,140 @@ function diffFrame(taskId: string, index: number): AgentFrame {
       footnote: "Accept or reject it and I will apply exactly that.",
       hunks: [hunk],
     },
+  });
+}
+
+/**
+ * The staging dashboard the mark-up question is about, as a data URL.
+ *
+ * A hand-written SVG rather than a PNG, and inline rather than fetched, for two reasons. The
+ * contract says an agent sends the picture's *bytes* rather than pointing the canvas at an
+ * address on the machine, so a fixture that reached out to a network would demonstrate the
+ * opposite of the rule; and it has to draw from a cleared checkout with no assets to find. It is
+ * a fake dashboard because what is being shown is where the box lands, not what is underneath it.
+ */
+const DASHBOARD_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="960" height="600" viewBox="0 0 960 600">
+  <rect width="960" height="600" fill="#0b1220"/>
+  <rect x="24" y="24" width="912" height="52" rx="8" fill="#111c30" stroke="#1e293b"/>
+  <text x="44" y="56" fill="#94a3b8" font-family="Inter, sans-serif" font-size="17">staging / checkout</text>
+  <text x="780" y="56" fill="#f59e0b" font-family="Inter, sans-serif" font-size="17">degraded</text>
+  <rect x="24" y="96" width="288" height="168" rx="10" fill="#111c30" stroke="#1e293b"/>
+  <text x="44" y="128" fill="#64748b" font-family="Inter, sans-serif" font-size="14">p95 latency</text>
+  <text x="44" y="176" fill="#e2e8f0" font-family="Inter, sans-serif" font-size="34">412ms</text>
+  <text x="44" y="204" fill="#f87171" font-family="Inter, sans-serif" font-size="14">+318% vs median</text>
+  <rect x="336" y="96" width="288" height="168" rx="10" fill="#111c30" stroke="#1e293b"/>
+  <text x="356" y="128" fill="#64748b" font-family="Inter, sans-serif" font-size="14">charge success</text>
+  <text x="356" y="176" fill="#e2e8f0" font-family="Inter, sans-serif" font-size="34">98.4%</text>
+  <text x="356" y="204" fill="#34d399" font-family="Inter, sans-serif" font-size="14">steady</text>
+  <rect x="648" y="96" width="288" height="168" rx="10" fill="#111c30" stroke="#1e293b"/>
+  <text x="668" y="128" fill="#64748b" font-family="Inter, sans-serif" font-size="14">error rate</text>
+  <text x="668" y="176" fill="#e2e8f0" font-family="Inter, sans-serif" font-size="34">6.1%</text>
+  <text x="668" y="204" fill="#f87171" font-family="Inter, sans-serif" font-size="14">climbing</text>
+  <rect x="24" y="288" width="912" height="288" rx="10" fill="#111c30" stroke="#1e293b"/>
+  <text x="44" y="320" fill="#64748b" font-family="Inter, sans-serif" font-size="14">requests per minute, last hour</text>
+  <polyline points="44,530 120,522 196,506 272,470 348,412 424,350 500,392 576,428 652,470 728,498 804,512 880,520" fill="none" stroke="#38bdf8" stroke-width="3"/>
+  <line x1="272" y1="348" x2="272" y2="556" stroke="#334155" stroke-width="1"/>
+  <text x="272" y="344" fill="#64748b" font-family="Inter, sans-serif" font-size="12" text-anchor="middle">deploy 2.14.3</text>
+</svg>`;
+
+/** The picture the mark-up question draws on: the bytes themselves, base64'd, as a data URL. */
+const DASHBOARD_IMAGE = `data:image/svg+xml;base64,${btoa(DASHBOARD_SVG)}`;
+
+/** The card that closes the demo, once the last of the three closing questions has landed. */
+function wrapUpFrame(): AgentFrame {
+  return frame("task", {
+    taskId: "wrap-up",
+    component: "Notice",
+    instruction: "That is the whole loop. Nothing is blocked on you now.",
+    props: {
+      level: "success",
+      title: "Patch reviewed",
+      body: "Each hunk got its own decision, and I will apply exactly the ones you accepted. The rest stay parked for you.",
+      bullets: [
+        "Every answer you gave came back as a JSON event on the socket, not as a screenshot",
+        "The chart data and the diff both came from the agent, so nothing on the canvas was invented",
+        "All eleven question kinds ran, and not one of them is a checkbox, a radio button or a dropdown",
+        "You marked an area of a picture and the answer came back as a fraction of it, not a pixel",
+        "Each card asked one question, so nothing was half-answered",
+        "The choice, the row, the rating, the hunk and the last matrix row each answered themselves on the press",
+        "Run the same session against the desktop app and the answers arrive identically",
+      ],
+      actions: [
+        { id: "again", label: "Restart the demo", variant: "primary" },
+        { id: "done", label: "Done", variant: "ghost" },
+      ],
+    },
+  });
+}
+
+/**
+ * The three closing questions: what is wrong, who owns it, and what to spend on it.
+ *
+ * Asked as one `run`, because the agent already knows it needs all three and none of them depends
+ * on the answers to the others. That is also why they arrive as three cards rather than one: a
+ * card that asks three things is a card that gets answered twice.
+ */
+function closingRun(): AgentFrame {
+  return frame("run", {
+    runId: "closing-details",
+    instruction: "Three things before I apply the patch, and none of them depends on the others.",
+    questions: [
+      {
+        id: "markup",
+        component: "RegionMark",
+        instruction:
+          "I could not capture the staging dashboard myself. Draw a box around the panel that " +
+          "looks wrong to you and I will read the pixels under it.",
+        props: {
+          src: DASHBOARD_IMAGE,
+          width: 960,
+          height: 600,
+          alt: "Staging checkout dashboard: p95 latency 412ms, charge success 98.4%, error rate 6.1%, and a request-rate chart",
+          mode: "box",
+          label: "staging / checkout, 960x600",
+          submitLabel: "Send this area",
+          help: "Drag across the panel, or aim with the arrow keys and press Enter twice. Nothing is sent until it looks right.",
+        },
+      },
+      {
+        id: "pair-owners",
+        component: "PairMatrix",
+        instruction:
+          "Put each failing suite with the team that should hear about it first. The press that " +
+          "places the last one sends the lot.",
+        props: {
+          requireAll: true,
+          options: [
+            { id: "checkout", label: "Checkout team" },
+            { id: "payments", label: "Payments team" },
+            { id: "platform", label: "Platform team" },
+          ],
+          rows: [
+            { id: "smoke-8841", label: "checkout smoke, +318% duration" },
+            { id: "smoke-8846", label: "checkout charge, 6.1% error rate" },
+            { id: "smoke-8847", label: "staging deploy, 2.14.3" },
+          ],
+          help: "Every row needs a home. The last press is the answer, so there is no button after it.",
+        },
+      },
+      {
+        id: "budget",
+        component: "AllocateBudget",
+        instruction:
+          "I have 40 minutes of verification budget before the next deploy window. Where should it go?",
+        props: {
+          total: 40,
+          step: 5,
+          items: [
+            { id: "repro", label: "Reproduce the slow checkout", description: "Ten runs against staging, timing each one" },
+            { id: "bisect", label: "Bisect the cart reducer", description: "Narrows the regression to one commit" },
+            { id: "load", label: "Load-test the charge path", description: "Whether 6.1% is the new baseline or a spike" },
+            { id: "docs", label: "Write up what we found", description: "So the next person does not repeat this" },
+          ],
+          help: "It has to add up to 40 before I can take it.",
+        },
+      },
+    ],
   });
 }
 
@@ -753,31 +887,78 @@ export function demoReply(
       return [
         {
           delay: 140,
-          frame: frame("note", { text: "Both hunks decided. Applying exactly what you approved.", kind: "progress" }),
+          frame: frame("note", {
+            text: "Both hunks decided. Applying exactly what you approved. Three things I still cannot answer myself.",
+            kind: "progress",
+          }),
         },
+        { delay: 200, frame: closingRun() },
+      ];
+    }
+
+    // The three closing questions. None of them was asked in terms of the others, so each one
+    // answers on its own wherever it falls in the queue; the wrap-up is written on the last of
+    // them, which is the mark-up card at the end of the run.
+    case "markup": {
+      if (event !== "submit") return [];
+      const region = (p.region ?? {}) as Record<string, unknown>;
+      const point = (p.point ?? {}) as Record<string, unknown>;
+      const percent = (value: unknown) =>
+        typeof value === "number" ? `${(value * 100).toFixed(1)}%` : "?";
+      const read =
+        Object.keys(region).length > 0
+          ? `a ${percent(region.w)} by ${percent(region.h)} box at ${percent(region.x)}, ${percent(region.y)}`
+          : `the spot at ${percent(point.x)}, ${percent(point.y)}`;
+      return [
         {
-          delay: 200,
-          frame: frame("task", {
-            taskId: "wrap-up",
-            component: "Notice",
-            instruction: "That is the whole loop. Nothing is blocked on you now.",
-            props: {
-              level: "success",
-              title: "Patch reviewed",
-              body: "Each hunk got its own decision, and I will apply exactly the ones you accepted. The rest stay parked for you.",
-              bullets: [
-                "Every answer you gave came back as a JSON event on the socket, not as a screenshot",
-                "The chart data and the diff both came from the agent, so nothing on the canvas was invented",
-                "All eight question kinds ran, and not one of them is a checkbox, a radio button or a dropdown",
-                "Each card asked one question, so nothing was half-answered",
-                "The choice, the row, the rating and the hunk each answered themselves on the press — no second button to find",
-                "Run the same session against the desktop app and the answers arrive identically",
-              ],
-              actions: [
-                { id: "again", label: "Restart the demo", variant: "primary" },
-                { id: "done", label: "Done", variant: "ghost" },
-              ],
-            },
+          delay: 140,
+          frame: frame("note", {
+            text: `Reading ${read} of the dashboard. That is the latency panel and the error-rate panel both, so I will pull both.`,
+            kind: "progress",
+          }),
+        },
+        { delay: 200, frame: wrapUpFrame() },
+      ];
+    }
+
+    case "pair-owners": {
+      if (event !== "submit") return [];
+      const pairs = (p.pairs ?? {}) as Record<string, unknown>;
+      const unassigned = Array.isArray(p.unassigned) ? (p.unassigned as string[]) : [];
+      const home = Object.entries(pairs)
+        .map(([row, owner]) => `${row} → ${String(owner)}`)
+        .join(", ");
+      return [
+        {
+          delay: 180,
+          frame: frame("note", {
+            text:
+              `Routing: ${home || "nothing placed"}` +
+              (unassigned.length > 0 ? `, ${unassigned.length} left open.` : "."),
+            kind: "meta",
+          }),
+        },
+      ];
+    }
+
+    case "budget": {
+      if (event !== "submit") return [];
+      const allocations = (p.allocations ?? {}) as Record<string, unknown>;
+      const spent = Object.values(allocations).filter((n): n is number => typeof n === "number");
+      const total = spent.reduce((sum, n) => sum + n, 0);
+      const biggest = Object.entries(allocations)
+        .filter(([, n]) => typeof n === "number")
+        .sort((a, b) => Number(b[1]) - Number(a[1]))[0];
+      return [
+        {
+          delay: 180,
+          frame: frame("note", {
+            text:
+              `Budget taken: ${total} minutes across ${spent.length} lines` +
+              (biggest && Number(biggest[1]) > 0
+                ? `, most of it on ${biggest[0]} (${String(biggest[1])} min).`
+                : "."),
+            kind: "meta",
           }),
         },
       ];

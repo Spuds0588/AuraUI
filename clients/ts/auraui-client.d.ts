@@ -42,7 +42,10 @@ export type ComponentName =
   | "DataGrid"
   | "InteractiveChart"
   | "RatingScale"
-  | "DiffReview";
+  | "DiffReview"
+  | "RegionMark"
+  | "PairMatrix"
+  | "AllocateBudget";
 
 export type EventName =
   | "ready"
@@ -285,6 +288,106 @@ export interface DiffReviewProps {
   /** Text above the hunk list, for a summary like "3 files, 2 risky hunks". */
   title?: string;
   footnote?: string;
+}
+
+/**
+ * Where a mark landed on a picture, as fractions of it.
+ *
+ * Normalised rather than in pixels: you know the size of the image you sent, the canvas knows
+ * only how large it managed to draw it on this screen, and a fraction is the one coordinate both
+ * sides agree on without being told the other's size. Origin is top-left, every value is 0 to 1.
+ */
+export interface RegionBox {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+export interface RegionPoint {
+  x: number;
+  y: number;
+}
+
+/**
+ * "Show me where."
+ *
+ * You send the picture (an `https:` URL, or the bytes as a `data:` URL from `imageData()`) and
+ * get back a place on it. `mode: "box"` draws an area and sends it on a button press; `mode:
+ * "point"` is answered by the press that makes it.
+ */
+export interface RegionMarkProps {
+  /** An `https:` URL, or a `data:image/...` URL from `imageData()`. Nothing else is accepted. */
+  src: string;
+  mode?: "box" | "point";
+  /** The image's natural size, so the frame has the right shape before it loads. */
+  width?: number;
+  height?: number;
+  /** Alt text. Worth sending: it is the only description a screen reader gets. */
+  alt?: string;
+  label?: string;
+  help?: string;
+  /** The button that sends a drawn box. Unused in `point` mode, which has no button. */
+  submitLabel?: string;
+}
+
+/** One thing to be placed in a `PairMatrix`. */
+export interface PairRow {
+  id: string;
+  label: string;
+  description?: string;
+  /** Restrict this row to a subset of the option ids. Omitted means every option is offered. */
+  options?: string[];
+}
+
+/** One place a `PairMatrix` row can be sent to. */
+export interface PairOption {
+  id: string;
+  label: string;
+  description?: string;
+}
+
+/**
+ * "Put each of these where it belongs."
+ *
+ * One question, answered by one press per row. With `requireAll` at its default the press that
+ * places the last row is the answer, so there is no button after it; with `requireAll: false`
+ * rows may be left alone on purpose and a button appears, because the rows you left alone are
+ * part of the answer.
+ */
+export interface PairMatrixProps {
+  rows: PairRow[];
+  options: PairOption[];
+  requireAll?: boolean;
+  submitLabel?: string;
+  help?: string;
+}
+
+/** One line of an `AllocateBudget`. */
+export interface AllocationItem {
+  id: string;
+  label: string;
+  description?: string;
+  /** Floor for this line. Defaults to 0. */
+  min?: number;
+}
+
+/**
+ * "Share this out", with the parts having to add up.
+ *
+ * Every line is a number with `minus` and `plus` buttons rather than a slider, and the figure
+ * left to give is on screen the whole time. With `requireTotal` at its default the answer cannot
+ * be sent until the parts add up.
+ */
+export interface AllocateBudgetProps {
+  items: AllocationItem[];
+  /** What the parts have to add up to. */
+  total: number;
+  /** How far one press moves a line. Defaults to 1. */
+  step?: number;
+  requireTotal?: boolean;
+  submitLabel?: string;
+  help?: string;
 }
 
 /* -- options --------------------------------------------------------- */
@@ -622,6 +725,70 @@ export declare function diffReview(
   extra?: { title?: string; footnote?: string },
 ): DiffReviewProps;
 
+/**
+ * Wrap a picture as the `data:` URL `regionMark` wants. Takes SVG text or image bytes, and works
+ * in Node and in a browser. Base64 is the normal case for a screenshot, not a workaround.
+ */
+export declare function imageData(data: string | Uint8Array, mime?: string): string;
+
+/**
+ * "Show me where" on a picture you send. Rejects anything but an `https:` URL or a
+ * `data:image/...` URL from `imageData()`: the canvas will not fetch a plaintext address or read
+ * a local file on the say-so of whatever opened a socket.
+ */
+export declare function regionMark(
+  src: string,
+  extra?: {
+    mode?: "box" | "point";
+    width?: number;
+    height?: number;
+    alt?: string;
+    label?: string;
+    help?: string;
+    submitLabel?: string;
+  },
+): RegionMarkProps;
+
+/** One place a row of a `pairMatrix` can be sent to. */
+export declare function pairOption(id: string, label: string, description?: string): PairOption;
+
+/**
+ * One thing to be placed in a `pairMatrix`. `options` narrows the row to a subset of the option
+ * ids, which is how you refuse a pairing you already know is impossible.
+ */
+export declare function pairRow(
+  id: string,
+  label: string,
+  extra?: { description?: string; options?: string[] },
+): PairRow;
+
+/**
+ * Rejects empty lists, duplicated row or option ids, and a row narrowed to an option that is not
+ * in `options`: each of those is a card the human could not answer.
+ */
+export declare function pairMatrix(
+  rows: PairRow[],
+  options: PairOption[],
+  extra?: { requireAll?: boolean; submitLabel?: string; help?: string },
+): PairMatrixProps;
+
+/** One line of an `allocateBudget`, with the least it may be given. */
+export declare function allocationItem(
+  id: string,
+  label: string,
+  extra?: { description?: string; min?: number },
+): AllocationItem;
+
+/**
+ * Rejects a total below 1, a step outside 1..total, and item floors that already add up to more
+ * than the total — a card that could never be sent and would never say why.
+ */
+export declare function allocateBudget(
+  items: AllocationItem[],
+  total: number,
+  extra?: { step?: number; requireTotal?: boolean; submitLabel?: string; help?: string },
+): AllocateBudgetProps;
+
 export declare const components: {
   option: typeof option;
   fieldOption: typeof fieldOption;
@@ -639,6 +806,13 @@ export declare const components: {
   diffHunk: typeof diffHunk;
   diffLine: typeof diffLine;
   diffReview: typeof diffReview;
+  imageData: typeof imageData;
+  regionMark: typeof regionMark;
+  pairOption: typeof pairOption;
+  pairRow: typeof pairRow;
+  pairMatrix: typeof pairMatrix;
+  allocationItem: typeof allocationItem;
+  allocateBudget: typeof allocateBudget;
 };
 
 export default Agent;

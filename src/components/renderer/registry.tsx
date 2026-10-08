@@ -9,6 +9,9 @@ import DataGrid from "@/components/tasks/DataGrid";
 import InteractiveChart from "@/components/tasks/InteractiveChart";
 import RatingScale from "@/components/tasks/RatingScale";
 import DiffReview from "@/components/tasks/DiffReview";
+import RegionMark from "@/components/tasks/RegionMark";
+import PairMatrix from "@/components/tasks/PairMatrix";
+import AllocateBudget from "@/components/tasks/AllocateBudget";
 
 /**
  * The one place that knows which React component draws which protocol component.
@@ -58,6 +61,21 @@ export const REGISTRY: RendererRegistry = {
     component: DiffReview as TaskComponent,
     label: "Review",
     hint: "Accept or reject each hunk of a change.",
+  },
+  RegionMark: {
+    component: RegionMark as TaskComponent,
+    label: "Mark-up",
+    hint: "Show the agent where, on the picture it sent.",
+  },
+  PairMatrix: {
+    component: PairMatrix as TaskComponent,
+    label: "Matching",
+    hint: "Send each item to the option it belongs to.",
+  },
+  AllocateBudget: {
+    component: AllocateBudget as TaskComponent,
+    label: "Split",
+    hint: "Share a total out across the lines.",
   },
 };
 

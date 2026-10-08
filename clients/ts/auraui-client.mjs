@@ -51,6 +51,9 @@ const DIFF_LINE_KINDS = new Set(["context", "add", "del"]);
 /** A RatingScale is one row of buttons, so it stops at ten points. */
 const RATING_MIN = 2;
 const RATING_MAX = 10;
+const MARK_MODES = new Set(["box", "point"]);
+/** The only kinds of address the canvas will draw a picture from. Mirrors the Rust bridge. */
+const MARK_SRC_PREFIXES = ["https://", "data:image/"];
 /**
  * How many questions one `run` may carry. Mirrors `RUN_LIMIT` in the bridge, which refuses a
  * longer one: past this a run stops being a set of questions and becomes a form.
@@ -1224,6 +1227,239 @@ export function diffReview(hunks, { title, footnote } = {}) {
   return compact({ hunks, title, footnote });
 }
 
+/**
+ * Wrap a picture as a `data:` URL, which is what `regionMark` wants.
+ *
+ * An agent showing the human a screenshot almost always has the bytes rather than an address,
+ * and that is the whole reason `regionMark` accepts nothing but `https:` and `data:image/`: the
+ * canvas will not fetch a plaintext address or read a local file on the say-so of whatever
+ * opened a socket. Base64 is not a workaround here, it is the normal case.
+ *
+ * Works in Node (through `Buffer`) and in a browser (through `btoa`), because the same client
+ * runs in both. A string is encoded as UTF-8 first, so an SVG built in code needs no file.
+ *
+ * @param {string|Uint8Array} data SVG text, or the image's bytes.
+ * @param {string} [mime] An `image/...` type. Defaults to `image/png`.
+ * @returns {string} A `data:` URL ready for `regionMark`.
+ */
+export function imageData(data, mime = "image/png") {
+  if (typeof mime !== "string" || !mime.startsWith("image/")) {
+    throw new AuraUIError('imageData mime must be an image type such as "image/png".');
+  }
+  const bytes =
+    typeof data === "string"
+      ? new TextEncoder().encode(data)
+      : data instanceof Uint8Array
+        ? data
+        : null;
+  if (bytes === null) {
+    throw new AuraUIError("imageData takes an SVG string or a Uint8Array of image bytes.");
+  }
+
+  let base64;
+  if (typeof Buffer !== "undefined") {
+    base64 = Buffer.from(bytes).toString("base64");
+  } else {
+    // Chunked: `String.fromCharCode(...bytes)` throws on a screenshot-sized argument list.
+    let binary = "";
+    const CHUNK = 0x8000;
+    for (let offset = 0; offset < bytes.length; offset += CHUNK) {
+      binary += String.fromCharCode(...bytes.subarray(offset, offset + CHUNK));
+    }
+    base64 = btoa(binary);
+  }
+  return `data:${mime};base64,${base64}`;
+}
+
+/**
+ * Props for RegionMark: "show me where" on a picture the agent sends.
+ *
+ * The Oracle case from the design doc — *draw a box around the element that is rendering wrong*
+ * — without a webview and without a canvas library: the agent takes its own screenshot, sends
+ * the bytes with `imageData()`, and gets back a place on that picture as fractions of it, which
+ * both sides agree on however large the canvas drew it.
+ *
+ * `mode: "box"` (the default) is drawn and then sent, because a rectangle is easier to get wrong
+ * than to say. `mode: "point"` is answered by the press that makes it, like a rating point. Send
+ * `alt` when the picture's content matters: it is the only description a screen reader gets.
+ *
+ * @param {string} src An `https:` URL, or a `data:image/...` URL from `imageData()`.
+ * @param {{mode?: "box"|"point", width?: number, height?: number, alt?: string, label?: string,
+ *          help?: string, submitLabel?: string}} [extra]
+ */
+export function regionMark(src, { mode, width, height, alt, label, help, submitLabel } = {}) {
+  requireString(src, "regionMark src");
+  if (!MARK_SRC_PREFIXES.some((prefix) => src.startsWith(prefix))) {
+    throw new AuraUIError(
+      "regionMark src must be an https: URL or a data:image/... URL from imageData(); the " +
+        "canvas will not fetch a plaintext address or read a local file.",
+    );
+  }
+  if (mode !== undefined && !MARK_MODES.has(mode)) {
+    throw new AuraUIError(`regionMark mode must be one of ${[...MARK_MODES].join(", ")}.`);
+  }
+  for (const [name, value] of [
+    ["width", width],
+    ["height", height],
+  ]) {
+    if (value !== undefined && (!Number.isInteger(value) || value <= 0)) {
+      throw new AuraUIError(`regionMark ${name} must be a positive whole number of pixels.`);
+    }
+  }
+  return compact({ src, mode, width, height, alt, label, help, submitLabel });
+}
+
+/**
+ * One place a `pairMatrix` row can be sent to, drawn as a button on every row that offers it.
+ *
+ * @param {string} id The answer that comes back for a row sent here.
+ * @param {string} label What the human reads on the button.
+ * @param {string} [description] A second line, for an option that needs one clause explaining it.
+ */
+export function pairOption(id, label, description) {
+  requireString(id, "pairOption id");
+  requireString(label, "pairOption label");
+  return compact({ id, label, description });
+}
+
+/**
+ * One thing to be placed in a `pairMatrix`.
+ *
+ * `options` narrows this row to a subset of the option ids, which is how an agent refuses a
+ * pairing it already knows is impossible rather than asking the human not to pick it. Leave it
+ * out to offer every option.
+ *
+ * @param {string} id The key this row comes back under.
+ * @param {string} label The thing being placed.
+ * @param {{description?: string, options?: string[]}} [extra]
+ */
+export function pairRow(id, label, { description, options } = {}) {
+  requireString(id, "pairRow id");
+  requireString(label, "pairRow label");
+  if (options !== undefined) {
+    requireNonEmptyArray(options, `options for pair row "${id}"`);
+    for (const optionId of options) requireString(optionId, `pair row "${id}" option id`);
+  }
+  return compact({ id, label, description, options });
+}
+
+/**
+ * Props for PairMatrix: "put each of these where it belongs".
+ *
+ * One question — which bucket each row goes in — answered by one press per row, the way a
+ * `sortableList` is one question answered by one drag per item. With `requireAll` at its default
+ * the press that places the last row *is* the answer, so there is no button after it; pass
+ * `requireAll: false` to let rows be left alone on purpose ("which of these are the same bug?"),
+ * in which case a button does appear, because the rows you left alone are part of the answer.
+ *
+ * @param {object[]} rows Built with `pairRow()`.
+ * @param {object[]} options Built with `pairOption()`.
+ * @param {{requireAll?: boolean, submitLabel?: string, help?: string}} [extra]
+ */
+export function pairMatrix(rows, options, { requireAll, submitLabel, help } = {}) {
+  requireNonEmptyArray(rows, "pairMatrix rows");
+  requireNonEmptyArray(options, "pairMatrix options");
+
+  const optionIds = new Set();
+  options.forEach((option, index) => {
+    if (typeof option !== "object" || option === null) {
+      throw new AuraUIError(`pairMatrix option ${index + 1} must be an object from pairOption().`);
+    }
+    requireString(option.id, `pairMatrix option ${index + 1} id`);
+    if (optionIds.has(option.id)) {
+      throw new AuraUIError(`pairMatrix option id "${option.id}" is used twice.`);
+    }
+    optionIds.add(option.id);
+  });
+
+  const rowIds = new Set();
+  rows.forEach((row, index) => {
+    if (typeof row !== "object" || row === null) {
+      throw new AuraUIError(`pairMatrix row ${index + 1} must be an object from pairRow().`);
+    }
+    requireString(row.id, `pairMatrix row ${index + 1} id`);
+    if (rowIds.has(row.id)) {
+      throw new AuraUIError(`pairMatrix row id "${row.id}" is used twice.`);
+    }
+    rowIds.add(row.id);
+    for (const allowed of row.options ?? []) {
+      if (!optionIds.has(allowed)) {
+        throw new AuraUIError(
+          `pairMatrix row "${row.id}" is narrowed to option "${allowed}", which is not one of " +
+            "the options.`,
+        );
+      }
+    }
+  });
+
+  return compact({ rows, options, requireAll, submitLabel, help });
+}
+
+/**
+ * One line of an `allocateBudget`, with the least it may be given.
+ *
+ * @param {string} id The key this line comes back under.
+ * @param {string} label What the human reads on the line.
+ * @param {{description?: string, min?: number}} [extra]
+ */
+export function allocationItem(id, label, { description, min } = {}) {
+  requireString(id, "allocationItem id");
+  requireString(label, "allocationItem label");
+  if (min !== undefined && (!Number.isInteger(min) || min < 0)) {
+    throw new AuraUIError(`allocationItem "${id}" min must be a whole number of units, 0 or more.`);
+  }
+  return compact({ id, label, description, min });
+}
+
+/**
+ * Props for AllocateBudget: "share this out", with the parts having to add up.
+ *
+ * One press moves a line by `step`, and the canvas shows how much is left the whole time. That is
+ * the reason this is a row of steppers rather than a row of sliders: a slider cannot say how far
+ * one press goes, and it never says what is left over, so a human slides five of them, lands a
+ * little off, and sends it anyway.
+ *
+ * The floors are checked here as well as in the bridge, because `min` values that already overrun
+ * `total` draw a card the human can never send — and never learns why.
+ *
+ * @param {object[]} items Built with `allocationItem()`.
+ * @param {number} total What the parts have to add up to.
+ * @param {{step?: number, requireTotal?: boolean, submitLabel?: string, help?: string}} [extra]
+ */
+export function allocateBudget(items, total, { step, requireTotal, submitLabel, help } = {}) {
+  requireNonEmptyArray(items, "allocateBudget items");
+  if (!Number.isInteger(total) || total < 1) {
+    throw new AuraUIError("allocateBudget total must be a whole number of units, 1 or more.");
+  }
+  if (step !== undefined && (!Number.isInteger(step) || step < 1 || step > total)) {
+    throw new AuraUIError(`allocateBudget step must be a whole number between 1 and ${total}.`);
+  }
+
+  const seen = new Set();
+  let floors = 0;
+  items.forEach((item, index) => {
+    if (typeof item !== "object" || item === null) {
+      throw new AuraUIError(
+        `allocateBudget item ${index + 1} must be an object from allocationItem().`,
+      );
+    }
+    requireString(item.id, `allocateBudget item ${index + 1} id`);
+    if (seen.has(item.id)) {
+      throw new AuraUIError(`allocateBudget item id "${item.id}" is used twice.`);
+    }
+    seen.add(item.id);
+    floors += item.min ?? 0;
+  });
+  if (floors > total) {
+    throw new AuraUIError(
+      `allocateBudget item minimums add up to ${floors}, more than the total (${total}): the ` +
+        "card could never reach its own total, so it would never be sendable.",
+    );
+  }
+
+  return compact({ items, total, step, requireTotal, submitLabel, help });
+}
+
 /** Namespace holding every prop builder, for `import { components as c }`. */
 export const components = {
   option,
@@ -1242,6 +1478,13 @@ export const components = {
   diffHunk,
   diffLine,
   diffReview,
+  imageData,
+  regionMark,
+  pairOption,
+  pairRow,
+  pairMatrix,
+  allocationItem,
+  allocateBudget,
 };
 
 export default Agent;

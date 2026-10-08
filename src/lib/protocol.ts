@@ -399,6 +399,20 @@ export interface EventPayload {
     accepted?: string[];
     /** DiffReview: the hunk ids the human rejected, in the order they were sent. */
     rejected?: string[];
+    /** RegionMark: the area the human drew, as fractions of the image they drew on. */
+    region?: RegionBox;
+    /** RegionMark: the single spot they marked, as fractions. Present in `point` mode. */
+    point?: RegionPoint;
+    /** RegionMark: which of the two the payload is carrying, echoing what was asked for. */
+    mode?: "box" | "point";
+    /** PairMatrix: one option id per row id. Every row is present unless `requireAll` is false. */
+    pairs?: Record<string, string>;
+    /** PairMatrix: the rows deliberately left unplaced, in the order they were sent. */
+    unassigned?: string[];
+    /** AllocateBudget: what each line was given, keyed by item id. */
+    allocations?: Record<string, number>;
+    /** AllocateBudget: the figure the parts add up to, echoed back for a cheap sanity check. */
+    total?: number;
     /**
      * Voice: recordings from the voice button, keyed by the field they answer.
      *
@@ -407,8 +421,21 @@ export interface EventPayload {
      */
     audio?: Record<string, AudioClip>;
   };
-  /** Selection changed in a DataGrid. Fires before any explicit submit. */
-  select: { rowIds: string[]; rows: Row[] };
+  /**
+   * A selection changed before anything was sent. Fires on a DataGrid row and on each row a
+   * `PairMatrix` places, so an agent that is waiting can watch the answer being made.
+   *
+   * Like `submit`, the fields present depend on the component: `pairs` and `unassigned` come
+   * from a `PairMatrix`, `rowIds`/`rows` from a grid.
+   */
+  select: {
+    rowIds?: string[];
+    rows?: Row[];
+    /** PairMatrix: the rows placed so far, keyed by row id. */
+    pairs?: Record<string, string>;
+    /** PairMatrix: the rows left unplaced so far, in the order they were sent. */
+    unassigned?: string[];
+  };
   /** A chart selection. `all` carries every selected datum, not just the first. */
   filter: {
     field?: string;
@@ -417,8 +444,23 @@ export interface EventPayload {
     datum?: Row;
     all?: Row[];
   };
-  /** A live field edit, only when the component declared `live: true`. */
-  change: { name?: string; value?: unknown; order?: string[] };
+  /**
+   * A live edit reported before anything was sent: a field the component declared `live: true`,
+   * a nudge of an `AllocateBudget` line, or a `DiffReview` hunk that still left others open.
+   *
+   * `name`/`value` are the thing that just moved. `allocations` and `total` are an
+   * `AllocateBudget`'s whole picture, because a split is only meaningful as a whole: the agent
+   * waiting on it wants to know both what the last press did and where the books now stand.
+   */
+  change: {
+    name?: string;
+    value?: unknown;
+    order?: string[];
+    /** AllocateBudget: what every line has been given so far, keyed by item id. */
+    allocations?: Record<string, number>;
+    /** AllocateBudget: the figure the lines are being made to add up to. */
+    total?: number;
+  };
   sort: { key: string; direction: "asc" | "desc" | "none" };
   /** The human dismissed the task without answering. */
   cancel: { reason?: string };
@@ -439,6 +481,9 @@ export const COMPONENT_NAMES = [
   "InteractiveChart",
   "RatingScale",
   "DiffReview",
+  "RegionMark",
+  "PairMatrix",
+  "AllocateBudget",
 ] as const;
 
 export type ComponentName = (typeof COMPONENT_NAMES)[number];
@@ -636,6 +681,145 @@ export interface DiffReviewProps {
   footnote?: string;
 }
 
+/**
+ * Where a mark landed on an image, as fractions of the picture.
+ *
+ * Normalised rather than in pixels on purpose: the agent knows the image it sent, the canvas
+ * knows only how large it managed to draw it, and a fraction means the two agree without
+ * either having to be told the other's size. Origin is the top-left, x grows right, y grows
+ * down, every value is between 0 and 1.
+ */
+export interface RegionBox {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+export interface RegionPoint {
+  x: number;
+  y: number;
+}
+
+/**
+ * "Show me where."
+ *
+ * The PRD's Oracle case — *draw a box around the element that is rendering wrong* — asked for a
+ * webview, a native screenshot and tldraw. It only actually needs a picture and a place on it,
+ * so this component takes the picture the agent already has in hand and returns the place. An
+ * agent that wants the human to point at something takes its own screenshot, sends the bytes as
+ * a `data:` URL, and gets back a fraction of the frame it sent.
+ *
+ * `src` is deliberately restricted to `https:` and `data:image/` by the bridge. An overlay that
+ * appears over someone's desktop unasked is not the place to let a socket on the machine name
+ * any URL it likes, and a local file path has no business being fetched either. An agent with
+ * bytes in hand base64s them, which is the common case anyway.
+ *
+ * A `point` is answered by the press that makes it, like a rating point or a row. A `box` is
+ * not: a drag is a shape the human is still choosing, and the moment the pointer is released
+ * is the moment they are least sure of it. So a box is drawn and then sent, and everything in
+ * between is undoable — which is also the honest reading of "mark the area", as opposed to
+ * "pick the one of these four that is broken".
+ */
+export interface RegionMarkProps {
+  /**
+   * The picture to mark. An `https:` URL, or a `data:image/...` URL when the agent has the
+   * bytes. No other scheme is accepted: the bridge refuses one before it reaches a window.
+   */
+  src: string;
+  /** The image's natural size in pixels, so the frame has the right shape before it loads. */
+  width?: number;
+  height?: number;
+  /** Alt text for the picture. Worth sending: it is the only description a screen reader has. */
+  alt?: string;
+  /** Mark one spot (`point`) or an area (`box`). Defaults to `box`, the Oracle case. */
+  mode?: "box" | "point";
+  /** A caption above the picture, e.g. "staging dashboard, 1280x800". */
+  label?: string;
+  help?: string;
+  /**
+   * The label on the button that sends a drawn box. Unused in `point` mode, where the press is
+   * the answer and there is no button to put a label on.
+   */
+  submitLabel?: string;
+}
+
+/** One thing to be placed, in a `PairMatrix`. */
+export interface PairRow {
+  id: string;
+  label: string;
+  description?: string;
+  /**
+   * Restrict this row to a subset of the option ids. Omitted means every option is offered,
+   * which is the usual case; a subset is how an agent refuses a pairing it already knows is
+   * impossible instead of asking the human not to pick it.
+   */
+  options?: string[];
+}
+
+/** One place a `PairMatrix` row can be sent to. */
+export interface PairOption {
+  id: string;
+  label: string;
+  description?: string;
+}
+
+/**
+ * "Put each of these where it belongs."
+ *
+ * One question — *which bucket does each of these go in* — answered by one press per row, the
+ * same way a list is one question answered by one drag per item. Rows: the default every row
+ * has to be placed; with `requireAll: false` a row may be left out, which is how an agent asks
+ * "which of these are duplicates of each other?" and reads the empty rows as "none of them".
+ *
+ * The last open row's press *is* the answer, exactly as the last undecided hunk is in a
+ * `DiffReview`: there is no button to press when the work is already done. With `requireAll:
+ * false` there is something left to say, so there is a button to say it with.
+ */
+export interface PairMatrixProps {
+  rows: PairRow[];
+  options: PairOption[];
+  /** Defaults to true: every row must be placed before the answer can be sent. */
+  requireAll?: boolean;
+  submitLabel?: string;
+  help?: string;
+}
+
+/** One line of an `AllocateBudget`. */
+export interface AllocationItem {
+  id: string;
+  label: string;
+  description?: string;
+  /** Floor for this line. Defaults to 0 — every line can be given nothing. */
+  min?: number;
+}
+
+/**
+ * "Share this out."
+ *
+ * The whole point is that the parts must add up, which is a thing sliders are famously bad at: a
+ * row of sliders tells the human how much each line has and never how much is left, so they
+ * settle on a total that is wrong by a little and send it. This draws each line as a number with
+ * `minus` and `plus` buttons — AuraUI has no slider anywhere, for the reason it has no dropdown:
+ * a control that hides its own value behind a gesture cannot be read at a glance, and cannot be
+ * nudged by one key either — and a running "left to give" figure that has to reach zero.
+ *
+ * The total is the agent's number and the split is the human's answer. The send button stays
+ * shut until the parts add up, because the one thing worth most in this component is never
+ * sending a split that does not.
+ */
+export interface AllocateBudgetProps {
+  items: AllocationItem[];
+  /** What the parts have to add up to. A positive whole number. */
+  total: number;
+  /** How much one `minus`/`plus` press moves a line. Defaults to 1. */
+  step?: number;
+  /** Defaults to true: the answer cannot be sent until the parts add up. */
+  requireTotal?: boolean;
+  submitLabel?: string;
+  help?: string;
+}
+
 export interface ComponentPropsMap {
   ActionCard: ActionCardProps;
   Notice: NoticeProps;
@@ -645,6 +829,9 @@ export interface ComponentPropsMap {
   InteractiveChart: InteractiveChartProps;
   RatingScale: RatingScaleProps;
   DiffReview: DiffReviewProps;
+  RegionMark: RegionMarkProps;
+  PairMatrix: PairMatrixProps;
+  AllocateBudget: AllocateBudgetProps;
 }
 
 /**
@@ -660,6 +847,9 @@ export type ComponentProps =
   | InteractiveChartProps
   | RatingScaleProps
   | DiffReviewProps
+  | RegionMarkProps
+  | PairMatrixProps
+  | AllocateBudgetProps
   | Record<string, unknown>;
 
 export function propsFor<C extends ComponentName>(
@@ -825,6 +1015,9 @@ export const COMPONENT_LABELS: Record<ComponentName, string> = {
   InteractiveChart: "Chart",
   RatingScale: "Rating",
   DiffReview: "Review",
+  RegionMark: "Mark-up",
+  PairMatrix: "Matching",
+  AllocateBudget: "Split",
 };
 
 /** One-line summary of what the human answered, shown on a resolved task card. */
@@ -846,6 +1039,20 @@ export function summarizeAnswer(event: EventName, payload: unknown): string {
         const rejected = Array.isArray(p.rejected) ? p.rejected.length : 0;
         return `Review sent: ${accepted} accepted, ${rejected} rejected`;
       }
+      if (p.region && typeof p.region === "object") return "Marked an area";
+      if (p.point && typeof p.point === "object") return "Marked a spot";
+      if (p.pairs && typeof p.pairs === "object") {
+        const n = Object.keys(p.pairs as object).length;
+        const left = Array.isArray(p.unassigned) ? p.unassigned.length : 0;
+        return `Matched ${n} row${n === 1 ? "" : "s"}${left > 0 ? `, left ${left} open` : ""}`;
+      }
+      if (p.allocations && typeof p.allocations === "object") {
+        const values = Object.values(p.allocations as Record<string, unknown>).filter(
+          (n): n is number => typeof n === "number",
+        );
+        const spent = values.reduce((sum, n) => sum + n, 0);
+        return `Split ${spent} across ${values.length} line${values.length === 1 ? "" : "s"}`;
+      }
       if (Array.isArray(p.order)) return `Submitted an order of ${p.order.length} items`;
       if (Array.isArray(p.rowIds)) return `Submitted ${p.rowIds.length} row(s)`;
       if (p.values && typeof p.values === "object") {
@@ -855,8 +1062,27 @@ export function summarizeAnswer(event: EventName, payload: unknown): string {
       return "Submitted";
     }
     case "select": {
+      if (p.pairs && typeof p.pairs === "object") {
+        const n = Object.keys(p.pairs as object).length;
+        return `Matched ${n} row${n === 1 ? "" : "s"} so far`;
+      }
       const n = Array.isArray(p.rowIds) ? p.rowIds.length : 0;
       return `Selected ${n} row${n === 1 ? "" : "s"}`;
+    }
+    case "change": {
+      if (p.allocations && typeof p.allocations === "object") {
+        const values = Object.values(p.allocations as Record<string, unknown>).filter(
+          (n): n is number => typeof n === "number",
+        );
+        const spent = values.reduce((sum, n) => sum + n, 0);
+        const total = typeof p.total === "number" ? ` of ${p.total}` : "";
+        return `Spent ${spent}${total} so far`;
+      }
+      if (Array.isArray(p.order)) return "Reordered";
+      if (typeof p.name === "string" && p.value !== undefined) {
+        return `Set ${p.name} to ${String(p.value)}`;
+      }
+      return "Changed";
     }
     case "filter":
       return p.value !== undefined ? `Filtered to ${String(p.value)}` : "Filtered the chart";

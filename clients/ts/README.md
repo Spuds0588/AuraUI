@@ -199,6 +199,14 @@ c.ratingScale(max, { min, labels, legend, defaultValue, help })
 c.diffHunk(id, lines, { header })
 c.diffLine(kind, text)
 c.diffReview(hunks, { title, footnote })
+
+c.imageData(data, mime = "image/png")
+c.regionMark(src, { mode, width, height, alt, label, help, submitLabel })
+c.pairOption(id, label, description?)
+c.pairRow(id, label, { description, options })
+c.pairMatrix(rows, options, { requireAll, submitLabel, help })
+c.allocationItem(id, label, { description, min })
+c.allocateBudget(items, total, { step, requireTotal, submitLabel, help })
 ```
 
 A wizard field is one of `text`, `textarea`, `number`, `date`, `choice` or `multi`. `choice`
@@ -267,6 +275,96 @@ A decision that still leaves hunks open emits non-terminal `change` with
 `submit` with `{ component, decisions, accepted, rejected }`, where `accepted` and `rejected`
 hold the hunk ids in the order you sent them. There is no `submitLabel` and no submit button.
 
+## RegionMark: show me where
+
+You send the picture; the human marks a place on it; you get the place back. This is the
+"draw a box around the element that is rendering wrong" question, without a webview and
+without a screenshot API on our side: take your own screenshot and send the bytes.
+
+```js
+import { readFile } from "node:fs/promises";
+
+const answer = await agent.task({
+  component: "RegionMark",
+  instruction: "Draw a box around the panel that looks wrong.",
+  props: c.regionMark(c.imageData(await readFile("staging.png")), {
+    width: 1280,
+    height: 800,
+    alt: "staging checkout dashboard: p95 412ms, error rate 6.1%",
+  }),
+});
+
+console.log(answer.payload.region); // { x: 0.25, y: 0.1, w: 0.5, h: 0.25 }
+```
+
+The answer is a **fraction of the picture**, never a pixel: you know the size of what you
+sent, the canvas knows how large it drew it on this screen, and a fraction is the one
+coordinate that needs no agreement about size. `mode: "point"` marks one spot and is answered
+by that press; `mode: "box"` (the default) is drawn and then sent, because a rectangle is
+easier to get wrong than to say. An SVG works too, via
+`c.imageData(svg, "image/svg+xml")`.
+
+`c.imageData` is not optional glue: `src` must be an `https:` URL or a `data:image/` URL. The
+canvas will not fetch a plaintext address or read a local file on the say-so of whatever
+opened a socket.
+
+## PairMatrix: put each of these where it belongs
+
+One question — which bucket each row goes in — answered by one press per row. The press that
+places the last open row *is* the answer, so there is no button after it. Pass
+`requireAll: false` to let rows be left alone on purpose ("which of these are the same bug?"),
+in which case a button appears, because the rows you left alone are part of the answer.
+
+```js
+const answer = await agent.task({
+  component: "PairMatrix",
+  instruction: "Put each failing suite with the team that should hear about it first.",
+  props: c.pairMatrix(
+    [
+      c.pairRow("smoke-8841", "checkout smoke, +318% duration"),
+      c.pairRow("smoke-8847", "staging deploy, 2.14.3", { options: ["platform"] }),
+    ],
+    [c.pairOption("checkout", "Checkout team"), c.pairOption("platform", "Platform team")],
+  ),
+});
+
+console.log(answer.payload.pairs); // { "smoke-8841": "checkout", ... }
+console.log(answer.payload.unassigned); // []
+```
+
+A row's `options` narrows it to a subset of the option ids, which is how you refuse a pairing
+you already know is impossible instead of asking the human not to pick it. Each placement
+arrives as a non-terminal `select` with `{ pairs, unassigned }`, so a blocking call can still
+watch the grid fill in.
+
+## AllocateBudget: share this out
+
+Every line is a number with minus and plus buttons, and the canvas shows how much is left the
+whole time, so the parts have to add up. There are no sliders in AuraUI: a slider cannot say
+how far one press goes, and it never says what is left over.
+
+```js
+const answer = await agent.task({
+  component: "AllocateBudget",
+  instruction: "I have 40 minutes of verification budget. Where should it go?",
+  props: c.allocateBudget(
+    [
+      c.allocationItem("repro", "Reproduce the slow checkout"),
+      c.allocationItem("bisect", "Bisect the cart reducer", { min: 5 }),
+    ],
+    40,
+    { step: 5 },
+  ),
+});
+
+console.log(answer.payload.allocations); // { repro: 25, bisect: 15 }
+console.log(answer.payload.total); // 40
+```
+
+`total` comes back with the answer as a cheap sanity check. Floors that already add up to more
+than `total` throw here and are refused by the bridge: that card could never reach its own
+total, so it could never be sent.
+
 ## Frame reference
 
 One JSON object per WebSocket text message, protocol version `1.0`.
@@ -297,12 +395,13 @@ Error codes: `bad_json`, `bad_frame`, `unsupported_version`, `unknown_component`
 leaving you waiting.
 
 Components: `ActionCard`, `Notice`, `WizardForm`, `SortableList`, `DataGrid`,
-`InteractiveChart`, `RatingScale`, `DiffReview`. The full prop shape of each is in
-`auraui-client.d.ts` and in `docs/PROTOCOL.md`.
+`InteractiveChart`, `RatingScale`, `DiffReview`, `RegionMark`, `PairMatrix`,
+`AllocateBudget`. The full prop shape of each is in `auraui-client.d.ts` and in
+`docs/PROTOCOL.md`.
 
 ## What the agent must not do
 
-- **Never send HTML, CSS, JavaScript or frontend code.** AuraUI renders eight fixed
+- **Never send HTML, CSS, JavaScript or frontend code.** AuraUI renders eleven fixed
   components from structured props. There is no arbitrary-code path, by design: an agent
   that can inject markup can break the window it is asking for help in.
 - **Never put numbers in a chart spec.** Send a Vega-Lite schema whose `data` is the named

@@ -1,4 +1,4 @@
-"""Prop builders for the eight AuraUI components.
+"""Prop builders for the eleven AuraUI components.
 
 Use these instead of hand-writing dicts. They spell the wire keys correctly (``taskId``,
 ``vegaSchema``, ``defaultValue``), keep optional keys out of the payload when unset, and
@@ -18,7 +18,8 @@ Every builder returns the ``props`` object for :meth:`auraui.Agent.task`::
 
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+import base64
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Union
 
 from .protocol import NOTICE_LEVELS
 
@@ -30,6 +31,10 @@ _SELECT_MODES = ("none", "single", "multi")
 _DIFF_LINE_KINDS = ("context", "add", "del")
 _RATING_MIN_POINTS = 2
 _RATING_MAX_POINTS = 10
+_MARK_MODES = ("box", "point")
+#: The only kinds of address the canvas will draw a picture from. Mirrors
+#: ``MARK_SRC_PREFIXES`` in the Rust bridge.
+_MARK_SRC_PREFIXES = ("https://", "data:image/")
 
 
 def _drop_none(mapping: Dict[str, Any]) -> Dict[str, Any]:
@@ -424,5 +429,234 @@ def diff_review(
             "hunks": list(hunks),
             "title": title,
             "footnote": footnote,
+        }
+    )
+
+
+# --------------------------------------------------------------------------
+# The three newer kinds: a place on a picture, a pairing, and a split
+# --------------------------------------------------------------------------
+
+
+def image_data(data: Union[str, bytes, bytearray], mime: str = "image/png") -> str:
+    """Wrap a picture as a ``data:`` URL, which is what ``region_mark`` wants.
+
+    An agent showing the human a screenshot almost always has the bytes rather than an address,
+    and this is the whole reason ``region_mark`` refuses anything but ``https:`` and
+    ``data:image/``: the canvas will not fetch a plaintext address or read a local file on the
+    say-so of whatever opened a socket. Base64 is not a workaround here, it is the normal case::
+
+        c.region_mark(c.image_data(Path("shot.png").read_bytes()), width=1280, height=800)
+
+    A ``str`` is encoded as UTF-8 first, so an SVG built in code works too::
+
+        c.region_mark(c.image_data(svg, "image/svg+xml"))
+    """
+    if isinstance(data, str):
+        raw = data.encode("utf-8")
+    elif isinstance(data, (bytes, bytearray)):
+        raw = bytes(data)
+    else:
+        raise ValueError("image_data takes an SVG string or image bytes.")
+    if not isinstance(mime, str) or not mime.startswith("image/"):
+        raise ValueError('image_data mime must be an image type such as "image/png".')
+    return f"data:{mime};base64," + base64.b64encode(raw).decode("ascii")
+
+
+def region_mark(
+    src: str,
+    *,
+    mode: Optional[str] = None,
+    width: Optional[int] = None,
+    height: Optional[int] = None,
+    alt: Optional[str] = None,
+    label: Optional[str] = None,
+    help: Optional[str] = None,
+    submit_label: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Props for RegionMark: \"show me where\" on a picture the agent sends.
+
+    The PRD's Oracle case — *draw a box around the element that is rendering wrong* — without a
+    webview and without tldraw: the agent takes its own screenshot, sends the bytes with
+    :func:`image_data`, and gets back a place on that picture as fractions of it, which both
+    sides agree on however large the canvas drew it.
+
+    ``mode="box"`` (the default) is drawn and then sent, because a rectangle is easier to get
+    wrong than to say. ``mode="point"`` is answered by the press that makes it, like a rating
+    point. Send ``alt`` for a picture whose content matters: it is the only description a screen
+    reader gets.
+    """
+    _require_text(src, "region_mark src")
+    if not src.startswith(_MARK_SRC_PREFIXES):
+        raise ValueError(
+            "region_mark src must be an https: URL or a data:image/... URL from image_data(); "
+            "the canvas will not fetch a plaintext address or read a local file."
+        )
+    if mode is not None:
+        _require_one_of(mode, _MARK_MODES, "region_mark mode")
+    for name, value in (("width", width), ("height", height)):
+        if value is not None and (not isinstance(value, int) or isinstance(value, bool) or value <= 0):
+            raise ValueError(f"region_mark {name} must be a positive whole number of pixels.")
+    return _drop_none(
+        {
+            "src": src,
+            "mode": mode,
+            "width": width,
+            "height": height,
+            "alt": alt,
+            "label": label,
+            "help": help,
+            "submitLabel": submit_label,
+        }
+    )
+
+
+def pair_option(id: str, label: str, description: Optional[str] = None) -> Dict[str, Any]:
+    """One place a :func:`pair_matrix` row can be sent to, drawn as a button per row."""
+    _require_text(id, "pair option id")
+    _require_text(label, "pair option label")
+    return _drop_none({"id": id, "label": label, "description": description})
+
+
+def pair_row(
+    id: str,
+    label: str,
+    description: Optional[str] = None,
+    options: Optional[Sequence[str]] = None,
+) -> Dict[str, Any]:
+    """One thing to be placed in a :func:`pair_matrix`.
+
+    ``options`` narrows this row to a subset of the option ids, which is how an agent refuses a
+    pairing it already knows is impossible rather than asking the human not to pick it. Leave it
+    out to offer every option.
+    """
+    _require_text(id, "pair row id")
+    _require_text(label, "pair row label")
+    if options is not None:
+        for option_id in _require_items(options, f'options for pair row "{id}"'):
+            _require_text(option_id, f'pair row "{id}" option id')
+        options = list(options)
+    return _drop_none({"id": id, "label": label, "description": description, "options": options})
+
+
+def pair_matrix(
+    rows: Sequence[Dict[str, Any]],
+    options: Sequence[Dict[str, Any]],
+    *,
+    require_all: Optional[bool] = None,
+    submit_label: Optional[str] = None,
+    help: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Props for PairMatrix: \"put each of these where it belongs\".
+
+    One question — which bucket each row goes in — answered by one press per row, the way a
+    ``sortable_list`` is one question answered by one drag per item. With ``require_all`` left at
+    its default the press that places the last row *is* the answer, so there is no button after
+    it; pass ``require_all=False`` to let rows be left alone on purpose (\"which of these are the
+    same bug?\"), in which case a button does appear, because the rows you left alone are part of
+    the answer.
+    """
+    _require_items(rows, "pair_matrix rows")
+    _require_items(options, "pair_matrix options")
+
+    option_ids: List[str] = []
+    for index, option in enumerate(options):
+        if not isinstance(option, dict):
+            raise ValueError(f"pair_matrix option {index + 1} must be a dict built with pair_option().")
+        option_id = _require_text(option.get("id"), f"pair_matrix option {index + 1} id")
+        if option_id in option_ids:
+            raise ValueError(f'pair_matrix option id "{option_id}" is used twice.')
+        option_ids.append(option_id)
+
+    row_ids: List[str] = []
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict):
+            raise ValueError(f"pair_matrix row {index + 1} must be a dict built with pair_row().")
+        row_id = _require_text(row.get("id"), f"pair_matrix row {index + 1} id")
+        if row_id in row_ids:
+            raise ValueError(f'pair_matrix row id "{row_id}" is used twice.')
+        row_ids.append(row_id)
+        for allowed in row.get("options") or ():
+            if allowed not in option_ids:
+                raise ValueError(
+                    f'pair_matrix row "{row_id}" is narrowed to option "{allowed}", which is not '
+                    "one of the options."
+                )
+
+    return _drop_none(
+        {
+            "rows": list(rows),
+            "options": list(options),
+            "requireAll": require_all,
+            "submitLabel": submit_label,
+            "help": help,
+        }
+    )
+
+
+def allocation_item(
+    id: str,
+    label: str,
+    description: Optional[str] = None,
+    min: Optional[int] = None,
+) -> Dict[str, Any]:
+    """One line of an :func:`allocate_budget`, with the least it may be given."""
+    _require_text(id, "allocation item id")
+    _require_text(label, "allocation item label")
+    if min is not None and (not isinstance(min, int) or isinstance(min, bool) or min < 0):
+        raise ValueError(f'allocation item "{id}" min must be a whole number of units, 0 or more.')
+    return _drop_none({"id": id, "label": label, "description": description, "min": min})
+
+
+def allocate_budget(
+    items: Sequence[Dict[str, Any]],
+    total: int,
+    *,
+    step: Optional[int] = None,
+    require_total: Optional[bool] = None,
+    submit_label: Optional[str] = None,
+    help: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Props for AllocateBudget: \"share this out\", with the parts having to add up.
+
+    One press moves a line by ``step`` and the canvas shows how much is left the whole time,
+    which is the reason this is a row of steppers rather than a row of sliders: a slider cannot
+    say how far one press goes, and it never says what is left over.
+
+    The floors are checked here as well as in the bridge, because a set of ``min`` values that
+    already overruns ``total`` draws a card the human can never send — and never learns why.
+    """
+    _require_items(items, "allocate_budget items")
+    if not isinstance(total, int) or isinstance(total, bool) or total < 1:
+        raise ValueError("allocate_budget total must be a whole number of units, 1 or more.")
+    if step is not None and (not isinstance(step, int) or isinstance(step, bool) or not 1 <= step <= total):
+        raise ValueError(f"allocate_budget step must be a whole number between 1 and {total}.")
+
+    seen: List[str] = []
+    floors = 0
+    for index, item in enumerate(items):
+        if not isinstance(item, dict):
+            raise ValueError(
+                f"allocate_budget item {index + 1} must be a dict built with allocation_item()."
+            )
+        item_id = _require_text(item.get("id"), f"allocate_budget item {index + 1} id")
+        if item_id in seen:
+            raise ValueError(f'allocate_budget item id "{item_id}" is used twice.')
+        seen.append(item_id)
+        floors += item.get("min") or 0
+    if floors > total:
+        raise ValueError(
+            f"allocate_budget item minimums add up to {floors}, more than the total ({total}): "
+            "the card could never reach its own total, so it would never be sendable."
+        )
+
+    return _drop_none(
+        {
+            "items": list(items),
+            "total": total,
+            "step": step,
+            "requireTotal": require_total,
+            "submitLabel": submit_label,
+            "help": help,
         }
     )

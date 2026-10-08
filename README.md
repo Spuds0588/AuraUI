@@ -40,7 +40,7 @@ part of answering the question in front of you, it is not there.
 
 ## What v1 does
 
-Eight component kinds, all verified end to end:
+Eleven component kinds, all verified end to end:
 
 | Component | The question it asks | Event back |
 | --- | --- | --- |
@@ -52,13 +52,18 @@ Eight component kinds, all verified end to end:
 | `InteractiveChart` | Click a bar to drill into the real data | `filter` |
 | `RatingScale` | Press a point on a bounded scale | `submit` |
 | `DiffReview` | Accept or reject each hunk of a change | `submit` |
+| `RegionMark` | Draw a box on the picture you were sent | `submit` |
+| `PairMatrix` | Send each item to the option it belongs to | `submit` |
+| `AllocateBudget` | Split a total across lines, and make it add up | `submit` |
 
 Choosing is always a button. There is deliberately no checkbox, radio button or dropdown
 anywhere in the canvas, and the bridge refuses a chart spec that would draw one.
 
 And choosing is *one* button. The press that makes a choice is the answer — `ActionCard`,
-`Notice` with actions, a single-select `DataGrid`, a `RatingScale` point and a single-hunk
-`DiffReview` all send themselves on that press. A button asking you to confirm the thing you
+`Notice` with actions, a single-select `DataGrid`, a `RatingScale` point, a single-hunk
+`DiffReview` and the last open row of a `PairMatrix` all send themselves on that press. A
+drawn box and a split of a total keep a button, because a rectangle and an arithmetic are the
+two things here that are easier to get wrong than to say. A button asking you to confirm the thing you
 just clicked turns one decision into two, so there is not one.
 
 Plus `note` for narration and `ack` so an agent always knows whether a window is actually
@@ -115,7 +120,7 @@ python3 examples/demo_agent.py     # standard library only, nothing to install
 node examples/demo-agent.mjs       # uses the optional `ws` package (already installed)
 ```
 
-Both scripts walk the human through all eight components and print every exchange. Each
+Both scripts walk the human through all eleven components and print every exchange. Each
 card asks one question, so the incident report is a short interview and the patch is
 reviewed one hunk at a time.
 

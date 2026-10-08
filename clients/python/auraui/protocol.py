@@ -42,6 +42,9 @@ COMPONENT_NAMES = (
     "InteractiveChart",
     "RatingScale",
     "DiffReview",
+    "RegionMark",
+    "PairMatrix",
+    "AllocateBudget",
 )
 
 NOTICE_LEVELS = ("info", "success", "warn", "error")

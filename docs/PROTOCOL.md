@@ -108,7 +108,7 @@ Only `agent.name` is required.
 | Field | Required | Meaning |
 | --- | --- | --- |
 | `taskId` | yes | Non-empty. Re-sending it replaces the card on the canvas. |
-| `component` | yes | One of the eight kinds in §4. |
+| `component` | yes | One of the eleven kinds in §4. |
 | `props` | yes | Renderer payload, shapes in §4. |
 | `instruction` | no | One or two sentences aimed at the human, drawn above the card. |
 | `urgent` | no | Adds an accent border and a "needs you" chip. Not colour alone. |
@@ -343,8 +343,9 @@ single-select `DataGrid`, a `RatingScale` point, a single-hunk `DiffReview` — 
 The `submit` payload is a **superset**: which keys appear depends on the component that sent
 it. `values` comes from a `WizardForm`, `order` from a `SortableList`, `rowIds`/`rows` from a
 `DataGrid`, `value`/`label` from a `RatingScale`, `decisions`/`accepted`/`rejected` from a
-`DiffReview`, and `audio` from any field the human spoke into. Read the keys you asked for
-instead of assuming one shape.
+`DiffReview`, `region`/`point`/`mode` from a `RegionMark`, `pairs`/`unassigned` from a
+`PairMatrix`, `allocations`/`total` from an `AllocateBudget`, and `audio` from any field the
+human spoke into. Read the keys you asked for instead of assuming one shape.
 
 Both SDKs resolve a blocking `task()` call on the **first terminal event** for that taskId.
 
@@ -356,7 +357,7 @@ than waiting.
 
 ```json
 { "v": "1.0", "type": "error", "code": "unknown_component",
-  "message": "Unknown component \"Chart\". Supported: ActionCard, Notice, WizardForm, SortableList, DataGrid, InteractiveChart, RatingScale, DiffReview." }
+  "message": "Unknown component \"Chart\". Supported: ActionCard, Notice, WizardForm, SortableList, DataGrid, InteractiveChart, RatingScale, DiffReview, RegionMark, PairMatrix, AllocateBudget." }
 ```
 
 | Code | Cause |
@@ -365,7 +366,7 @@ than waiting.
 | `bad_frame` | No `type`, or a required field is missing or the wrong type. Also used for task `props` the bridge refuses, such as a removed wizard field kind or empty `options`; `message` says which. |
 | `unknown_type` | `type` is not a frame in this document. |
 | `unsupported_version` | `v` is not `1.0`. |
-| `unknown_component` | `component` is not one of the eight. |
+| `unknown_component` | `component` is not one of the eleven. |
 | `unknown_task` | An operation named a taskId that is not open. |
 
 Validation happens in that order. A `bad_json` frame **does not close the socket**: one
@@ -672,6 +673,156 @@ Send **one hunk per card**. Because the review cannot be sent until every hunk i
 a decision, a card with two hunks is two questions wearing one card, and the human pays for
 that with a second press.
 
+### RegionMark — show me where
+
+```json
+{ "src": "data:image/png;base64,iVBORw0KGgo…",
+  "width": 1280, "height": 800,
+  "mode": "box",
+  "alt": "staging checkout dashboard: p95 412ms, error rate 6.1%",
+  "label": "staging / checkout, 1280x800",
+  "submitLabel": "Send this area" }
+```
+
+"Draw a box around the element that is rendering wrong" — the Oracle case — with a picture
+instead of a webview. You send the image; the human marks a place on it; you get the place back.
+
+`mode` ∈ `box | point`, default `box`.
+
+**The answer is a fraction of the image, never a pixel.** You know the size of what you sent;
+the canvas knows only how large it managed to draw it on whatever screen the card landed on. A
+fraction is the one coordinate both sides agree on without either being told the other's size,
+and it survives the window being resized between the question and the answer. `x`, `y`, `w` and
+`h` are all `0` to `1`, with the origin at the top-left.
+
+`point` mode emits terminal `submit` on the press that marks it:
+
+```json
+{ "component": "RegionMark", "mode": "point", "point": { "x": 0.4125, "y": 0.2 } }
+```
+
+`box` mode does not, and that is deliberate: releasing a drag is the moment a human is *least*
+sure they got the edge right, and a rectangle is the one thing here that is easier to get wrong
+than to say. A drawn box can be redrawn as often as it takes and is sent by a button:
+
+```json
+{ "component": "RegionMark", "mode": "box",
+  "region": { "x": 0.25, "y": 0.1, "w": 0.5, "h": 0.25 } }
+```
+
+The whole card works from the keyboard. A crosshair starts in the middle of the picture, the
+arrow keys move it (hold Shift for a bigger step), Enter drops the first corner and again the
+second, and in `point` mode Enter marks the spot and answers.
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `src` | yes | An `https:` URL, or a `data:image/…` URL. **Nothing else.** |
+| `mode` | no | `"box"` (default) or `"point"`. |
+| `width`, `height` | no | The image's natural size in pixels, so the frame has the right shape before it loads. |
+| `alt` | no | Alt text. Send it: it is the only description a screen reader gets. |
+| `label` | no | A caption above the picture. |
+| `submitLabel` | no | The label on the button that sends a drawn box. Unused in `point` mode. |
+| `help` | no | Your own words under the picture, replacing the canvas's. |
+
+**`src` is restricted to `https:` and `data:image/`.** AuraUI draws over whatever the human was
+already doing, so it will not fetch a plaintext address or read a local file on the say-so of
+whatever opened a socket. An agent holding a screenshot base64s it, which is the common case
+anyway — both SDKs ship an `image_data` / `imageData` helper for exactly that.
+
+### PairMatrix — put each of these where it belongs
+
+```json
+{ "options": [ { "id": "checkout", "label": "Checkout team" },
+               { "id": "platform", "label": "Platform team" } ],
+  "rows": [ { "id": "smoke-8841", "label": "checkout smoke, +318% duration" },
+            { "id": "smoke-8847", "label": "staging deploy, 2.14.3", "options": ["platform"] } ],
+  "requireAll": true,
+  "help": "Every row needs a home." }
+```
+
+One question — which bucket each row goes in — answered by one press per row, the way a
+`SortableList` is one question answered by one drag per item. `rows[].options` narrows a row to
+a subset of the option ids, which is how you refuse a pairing you already know is impossible
+instead of asking the human not to pick it.
+
+**The press that places the last open row sends the answer**, exactly as the last undecided hunk
+does in a `DiffReview`. Until then each placement emits non-terminal `select`:
+
+```json
+{ "pairs": { "smoke-8841": "checkout" }, "unassigned": ["smoke-8847"] }
+```
+
+With `requireAll` at its default the terminal event is:
+
+```json
+{ "component": "PairMatrix",
+  "pairs": { "smoke-8841": "checkout", "smoke-8847": "platform" },
+  "unassigned": [] }
+```
+
+With `requireAll: false` a row may be left alone on purpose — "which of these are the same
+bug?" — and since the rows you left alone are then part of the answer, a button appears to send
+it. `unassigned` lists those row ids in the order they were sent.
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `rows` | yes | Non-empty. Each needs a non-empty `id` and `label`; ids must be unique. |
+| `rows[].options` | no | A non-empty subset of the option ids. Omitted means every option is offered. |
+| `options` | yes | Non-empty. Each needs a non-empty `id` and `label`; ids must be unique. |
+| `requireAll` | no | Default `true`. `false` lets rows be left open and adds a submit button. |
+| `submitLabel` | no | Only used when `requireAll` is `false`. |
+
+Every option is a button on every row that offers it, so a row is answered by a press rather
+than by opening a menu and finding the right entry — AuraUI has no dropdown anywhere, and a
+matrix of them would be the worst place to start. Rows are numbered, and the digit opens a row
+whose options then take letters, so the whole grid is reachable without the pointer.
+
+### AllocateBudget — share this out
+
+```json
+{ "total": 40, "step": 5,
+  "items": [ { "id": "repro", "label": "Reproduce the slow checkout" },
+             { "id": "bisect", "label": "Bisect the cart reducer", "min": 5 } ],
+  "help": "It has to add up to 40 before I can take it." }
+```
+
+Every line is a number with `minus` and `plus` buttons, and the figure left to give is on screen
+the whole time. That is the reason it is a row of steppers rather than a row of sliders: a slider
+cannot say how far one press goes, and it never says what is left over, so a human slides five of
+them, lands a little off, and sends it anyway.
+
+With `requireTotal` at its default the answer cannot be sent until the parts add up; the button
+stays shut and the canvas says how much is left. Each nudge emits non-terminal `change`:
+
+```json
+{ "name": "repro", "value": 25 }
+```
+
+The button emits:
+
+```json
+{ "component": "AllocateBudget",
+  "allocations": { "repro": 25, "bisect": 15 },
+  "total": 40 }
+```
+
+`total` is echoed back in the answer as a cheap sanity check: the whole point of the question is
+that the parts add up to a number you chose, and the one thing you do not want to have to
+discover later is that they did not.
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `items` | yes | Non-empty. Each needs a non-empty `id` and `label`; ids must be unique. |
+| `items[].min` | no | A floor for that line. `0` by default. |
+| `total` | yes | A whole number, 1 or more. What the parts have to add up to. |
+| `step` | no | A whole number from 1 to `total`. Default `1`. |
+| `requireTotal` | no | Default `true`: the answer cannot be sent until it adds up. |
+| `submitLabel` | no | The label on the send button. |
+
+`items[].min` values that already add up to more than `total` are **refused at the bridge**: that
+card could never reach its own total, so it could never be sent, and the human would have no way
+to say so.
+
 ### Unknown components
 
 Rejected at the bridge with `unknown_component` and never rendered. If a spec fails to
@@ -808,6 +959,6 @@ also reads `VITE_AURAUI_STT_URL` and `VITE_AURAUI_STT_MODEL` **at build time** f
 transcription; see the voice section under `WizardForm`. Leaving both unset is supported.
 
 Run `python3 examples/demo_agent.py` or `node examples/demo-agent.mjs` for a full walkthrough
-of all eight component kinds against a live bridge. Each card asks one question and most of
+of all eleven component kinds against a live bridge. Each card asks one question and most of
 them are answered by a single press: the incident report is a run of single-question cards,
 and the patch is reviewed one hunk at a time.

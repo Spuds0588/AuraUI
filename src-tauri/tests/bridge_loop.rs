@@ -803,6 +803,185 @@ async fn a_run_becomes_ordered_questions_with_one_answer_each() {
  * Loopback only
  * ------------------------------------------------------------------ */
 
+/* ------------------------------------------------------------------ *
+ * The three newer question kinds, over a real socket
+ * ------------------------------------------------------------------ */
+
+/// A mark-up, a matching grid and a split, each asked and answered through the real bridge.
+///
+/// These three exist to widen the kinds of question a person can be asked — a place on a picture,
+/// a row-to-option pairing, a total to divide — and what matters over the wire is the same thing
+/// that matters for the other eight: the agent gets an ack, the human gets a card, and the answer
+/// comes back as an event on the same socket. The refusals matter just as much: a mark-up with no
+/// usable picture and a split that can never add up are both caught before a window opens.
+#[tokio::test]
+async fn the_three_newer_kinds_reach_a_human_and_come_back() {
+    let sink = Arc::new(TestSink::new(Delivery::Attached));
+    let mut delivered = sink.subscribe();
+    let handle = start_bridge(sink.clone()).await;
+    let mut ws = connect(&handle).await;
+    let _welcome = recv_json(&mut ws).await;
+
+    // A picture named by a plaintext address: refused, because an overlay does not get to fetch
+    // whatever a socket on the machine asks it to.
+    send_json(
+        &mut ws,
+        json!({
+            "type": "task",
+            "taskId": "t_mark_bad",
+            "component": "RegionMark",
+            "props": {"src": "http://example.com/shot.png"}
+        }),
+    )
+    .await;
+    let error = recv_json(&mut ws).await;
+    assert_eq!(error["code"].as_str(), Some("bad_frame"));
+    assert!(
+        error["message"].as_str().unwrap_or_default().contains("https"),
+        "the refusal should say what a picture may be: {error}"
+    );
+
+    // Floors that already overrun the total: a card that could never be sent, and never says why.
+    send_json(
+        &mut ws,
+        json!({
+            "type": "task",
+            "taskId": "t_budget_bad",
+            "component": "AllocateBudget",
+            "props": {
+                "total": 10,
+                "items": [
+                    {"id": "a", "label": "A", "min": 8},
+                    {"id": "b", "label": "B", "min": 9}
+                ]
+            }
+        }),
+    )
+    .await;
+    let error = recv_json(&mut ws).await;
+    assert_eq!(error["code"].as_str(), Some("bad_frame"));
+    assert!(
+        error["message"].as_str().unwrap_or_default().contains("17"),
+        "the refusal should show its arithmetic: {error}"
+    );
+    assert!(
+        sink.task_frames().is_empty(),
+        "neither refusal may reach the human's surface"
+    );
+
+    // A mark-up, answered with a box in fractions of the picture.
+    let picture = "data:image/png;base64,iVBORw0KGgo=";
+    send_json(
+        &mut ws,
+        json!({
+            "type": "task",
+            "taskId": "t_mark",
+            "component": "RegionMark",
+            "instruction": "Draw a box around the panel that looks wrong.",
+            "props": {"src": picture, "width": 960, "height": 600, "mode": "box"}
+        }),
+    )
+    .await;
+    let ack = recv_json(&mut ws).await;
+    assert_eq!(ack["status"].as_str(), Some("rendered"));
+    assert_eq!(ack["taskId"].as_str(), Some("t_mark"));
+    assert!(
+        ack["wait"]["estimatedMs"].as_u64().is_some(),
+        "a delivered question quotes how long an answer usually takes: {ack}"
+    );
+
+    match next_delivered(&mut delivered).await {
+        AgentFrame::Task(task) => {
+            assert_eq!(task.component, "RegionMark");
+            assert_eq!(task.props["src"].as_str(), Some(picture));
+        }
+        other => panic!("expected the mark-up at the human's surface, got {other:?}"),
+    }
+
+    let answered = handle.emit_event(
+        "t_mark",
+        EventName::Submit,
+        json!({"component":"RegionMark","mode":"box","region":{"x":0.25,"y":0.1,"w":0.5,"h":0.25}}),
+    );
+    let event = recv_json(&mut ws).await;
+    assert_eq!(event["event"].as_str(), Some("submit"));
+    assert_eq!(event["payload"]["region"]["w"].as_f64(), Some(0.5));
+    assert_eq!(event["seq"].as_u64(), Some(answered.seq));
+
+    // The matching grid. Its partial answers arrive as signals before the last row lands, which is
+    // what lets an agent watch a matrix fill in rather than staring at a silent card.
+    send_json(
+        &mut ws,
+        json!({
+            "type": "task",
+            "taskId": "t_pairs",
+            "component": "PairMatrix",
+            "props": {
+                "options": [{"id":"checkout","label":"Checkout"},{"id":"platform","label":"Platform"}],
+                "rows": [{"id":"r1","label":"checkout smoke"},{"id":"r2","label":"staging deploy"}]
+            }
+        }),
+    )
+    .await;
+    let ack = recv_json(&mut ws).await;
+    assert_eq!(ack["status"].as_str(), Some("rendered"));
+
+    let signal = handle.emit_event("t_pairs", EventName::Select, json!({"pairs":{"r1":"checkout"}}));
+    let wire = recv_json(&mut ws).await;
+    assert_eq!(wire["event"].as_str(), Some("select"));
+    assert_eq!(wire["seq"].as_u64(), Some(signal.seq));
+    assert!(
+        !signal.event.is_terminal(),
+        "a half-placed matrix is not an answer"
+    );
+
+    let placed = handle.emit_event(
+        "t_pairs",
+        EventName::Submit,
+        json!({"component":"PairMatrix","pairs":{"r1":"checkout","r2":"platform"},"unassigned":[]}),
+    );
+    let wire = recv_json(&mut ws).await;
+    assert_eq!(wire["event"].as_str(), Some("submit"));
+    assert_eq!(wire["payload"]["pairs"]["r2"].as_str(), Some("platform"));
+    assert_eq!(wire["seq"].as_u64(), Some(placed.seq));
+
+    // The split, echoing back the figure the parts add up to.
+    send_json(
+        &mut ws,
+        json!({
+            "type": "task",
+            "taskId": "t_budget",
+            "component": "AllocateBudget",
+            "props": {
+                "total": 40,
+                "step": 5,
+                "items": [{"id":"repro","label":"Reproduce"},{"id":"bisect","label":"Bisect"}]
+            }
+        }),
+    )
+    .await;
+    let ack = recv_json(&mut ws).await;
+    assert_eq!(ack["status"].as_str(), Some("rendered"));
+
+    let split = handle.emit_event(
+        "t_budget",
+        EventName::Submit,
+        json!({"component":"AllocateBudget","allocations":{"repro":25,"bisect":15},"total":40}),
+    );
+    let wire = recv_json(&mut ws).await;
+    assert_eq!(wire["event"].as_str(), Some("submit"));
+    assert_eq!(wire["payload"]["allocations"]["repro"].as_i64(), Some(25));
+    assert_eq!(wire["payload"]["total"].as_i64(), Some(40));
+    assert_eq!(wire["seq"].as_u64(), Some(split.seq));
+
+    // All three went in front of the human, one after another, and the bridge counted every
+    // event on the way back — including the half-placed matrix.
+    assert_eq!(sink.task_frames().len(), 3);
+    assert_eq!(handle.emitted(), 4);
+
+    handle.shutdown();
+}
+
 #[tokio::test]
 async fn the_bridge_refuses_to_listen_off_loopback() {
     let sink = Arc::new(TestSink::new(Delivery::Attached));

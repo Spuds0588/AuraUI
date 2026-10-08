@@ -581,7 +581,7 @@ impl CanvasFrame {
 /// The component kinds v1 knows how to render. Mirrors `COMPONENT_NAMES` in protocol.ts and
 /// the list quoted in `docs/PROTOCOL.md`. The order is the order an agent sees in the
 /// `unknown_component` message, so all three have to agree on it.
-pub const COMPONENT_NAMES: [&str; 8] = [
+pub const COMPONENT_NAMES: [&str; 11] = [
     "ActionCard",
     "Notice",
     "WizardForm",
@@ -590,6 +590,9 @@ pub const COMPONENT_NAMES: [&str; 8] = [
     "InteractiveChart",
     "RatingScale",
     "DiffReview",
+    "RegionMark",
+    "PairMatrix",
+    "AllocateBudget",
 ];
 
 pub fn is_known_component(name: &str) -> bool {
@@ -615,6 +618,9 @@ fn required_keys(component: &str) -> &'static [(&'static str, &'static str)] {
         "InteractiveChart" => &[("vegaSchema", "object"), ("data", "array")],
         "RatingScale" => &[("max", "number")],
         "DiffReview" => &[("hunks", "array")],
+        "RegionMark" => &[("src", "string")],
+        "PairMatrix" => &[("rows", "array"), ("options", "array")],
+        "AllocateBudget" => &[("items", "array"), ("total", "number")],
         _ => &[],
     }
 }
@@ -682,6 +688,15 @@ pub fn validate_props(component: &str, props: &Value) -> Result<(), String> {
     }
     if component == "DiffReview" {
         validate_diff_review(props)?;
+    }
+    if component == "RegionMark" {
+        validate_region_mark(props)?;
+    }
+    if component == "PairMatrix" {
+        validate_pair_matrix(props)?;
+    }
+    if component == "AllocateBudget" {
+        validate_allocation(props)?;
     }
 
     Ok(())
@@ -829,6 +844,292 @@ fn validate_diff_review(props: &Value) -> Result<(), String> {
                 ));
             }
         }
+    }
+
+    Ok(())
+}
+
+/// The only kinds of address a `RegionMark` will draw a picture from.
+///
+/// Deliberately two. An overlay that appears over somebody's desktop unasked is not the place
+/// to let a socket on the machine name whatever URL it likes (a plain `http:` fetch from the
+/// human's browser, or a `file:` read of a path they never chose), and neither scheme is needed
+/// to do the job: an agent with a screenshot in hand base64s it, which is the common case.
+/// `https:` is allowed for a picture that already lives somewhere public.
+pub const MARK_SRC_PREFIXES: [&str; 2] = ["https://", "data:image/"];
+
+/// Check a `RegionMark`'s picture and the way it is to be marked.
+///
+/// The one thing this component cannot do without is somewhere to draw: an unusable `src`
+/// reaches the canvas as a broken image under a question about a picture nobody can see.
+fn validate_region_mark(props: &Value) -> Result<(), String> {
+    let Some(obj) = props.as_object() else {
+        return Ok(());
+    };
+
+    if let Some(src) = obj.get("src").and_then(Value::as_str) {
+        if !MARK_SRC_PREFIXES.iter().any(|prefix| src.starts_with(prefix)) {
+            return Err(
+                "`props.src` for RegionMark must be an `https:` URL or a `data:image/...` URL. AuraUI draws over whatever the human was already doing, so it will not fetch a plaintext address or read a local file on the say-so of whatever opened a socket; send the image's bytes as a data URL instead."
+                    .into(),
+            );
+        }
+    }
+
+    if let Some(mode) = obj.get("mode") {
+        if !mode.is_null() {
+            match mode.as_str() {
+                Some("box") | Some("point") => {}
+                other => {
+                    let shown = match other {
+                        Some(value) => format!("`{value}`"),
+                        None => "not a string".to_string(),
+                    };
+                    return Err(format!(
+                        "`props.mode` for RegionMark is {shown}, which the canvas cannot draw; expected `box` (draw an area) or `point` (mark one spot)."
+                    ));
+                }
+            }
+        }
+    }
+
+    for key in ["width", "height"] {
+        if let Some(value) = obj.get(key) {
+            if value.is_null() {
+                continue;
+            }
+            match value.as_f64() {
+                Some(number) if number > 0.0 => {}
+                _ => {
+                    return Err(format!(
+                        "`props.{key}` for RegionMark must be a positive number: the picture's natural size in pixels. It only decides the frame's shape before the image loads, so leave the key out when it is not known."
+                    ))
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Check a `PairMatrix`'s rows, its options, and the restriction each row may place on them.
+///
+/// Both lists are keyed by id, and both are a dead end when the id is missing: the answer comes
+/// back as `{rowId: optionId}` and a row that cannot be named cannot be answered, while a
+/// repeated id has two answers and no way to tell them apart. A row's `options` subset is
+/// checked against the real option ids for the same reason an empty option list is: a row
+/// restricted to an option that does not exist draws a line with nothing to press.
+fn validate_pair_matrix(props: &Value) -> Result<(), String> {
+    let Some(obj) = props.as_object() else {
+        return Ok(());
+    };
+
+    let mut option_ids: Vec<&str> = Vec::new();
+    if let Some(options) = obj.get("options").and_then(Value::as_array) {
+        if options.is_empty() {
+            return Err(
+                "`props.options` is empty for PairMatrix: every row would offer nothing to press. AuraUI has no dropdown, so the options are the whole vocabulary the human can answer with."
+                    .into(),
+            );
+        }
+        for (index, option) in options.iter().enumerate() {
+            let Some(option) = option.as_object() else {
+                return Err(format!(
+                    "`props.options[{index}]` must be an object with an `id` and a `label`."
+                ));
+            };
+            let Some(id) = option
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty())
+            else {
+                return Err(format!(
+                    "`props.options[{index}].id` must be a non-empty string; the answer comes back keyed by it."
+                ));
+            };
+            if option_ids.contains(&id) {
+                return Err(format!(
+                    "`props.options[{index}].id` is `{id}`, which another option already uses: a repeated id could not be told apart in the answer."
+                ));
+            }
+            if option.get("label").and_then(Value::as_str).is_none() {
+                return Err(format!(
+                    "`props.options[{index}].label` must be a string: a button with no label is one the human cannot choose."
+                ));
+            }
+            option_ids.push(id);
+        }
+    }
+
+    let Some(rows) = obj.get("rows").and_then(Value::as_array) else {
+        return Ok(());
+    };
+    if rows.is_empty() {
+        return Err(
+            "`props.rows` is empty for PairMatrix: the human would have nothing to place.".into(),
+        );
+    }
+
+    let mut row_ids: Vec<&str> = Vec::new();
+    for (index, row) in rows.iter().enumerate() {
+        let Some(row) = row.as_object() else {
+            return Err(format!(
+                "`props.rows[{index}]` must be an object with an `id` and a `label`."
+            ));
+        };
+        let Some(id) = row
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+        else {
+            return Err(format!(
+                "`props.rows[{index}].id` must be a non-empty string; the answer comes back keyed by it."
+            ));
+        };
+        if row_ids.contains(&id) {
+            return Err(format!(
+                "`props.rows[{index}].id` is `{id}`, which another row already uses: one row would answer for the other."
+            ));
+        }
+        if row.get("label").and_then(Value::as_str).is_none() {
+            return Err(format!(
+                "`props.rows[{index}].label` must be a string: it is the thing being placed, and the human needs to read it."
+            ));
+        }
+
+        if let Some(restricted) = row.get("options") {
+            if !restricted.is_null() {
+                let Some(allowed) = restricted.as_array() else {
+                    return Err(format!(
+                        "`props.rows[{index}].options` must be an array of option ids."
+                    ));
+                };
+                if allowed.is_empty() {
+                    return Err(format!(
+                        "`props.rows[{index}].options` is empty, so the row offers nothing to press; leave the key out to offer every option."
+                    ));
+                }
+                for (position, allowed_id) in allowed.iter().enumerate() {
+                    match allowed_id.as_str() {
+                        Some(allowed_id) if option_ids.contains(&allowed_id) => {}
+                        Some(unknown) => {
+                            return Err(format!(
+                                "`props.rows[{index}].options[{position}]` is `{unknown}`, which is not one of `props.options`; a row can only be narrowed to options that exist."
+                            ))
+                        }
+                        None => {
+                            return Err(format!(
+                                "`props.rows[{index}].options[{position}]` must be an option id string."
+                            ))
+                        }
+                    }
+                }
+            }
+        }
+
+        row_ids.push(id);
+    }
+
+    Ok(())
+}
+
+/// Check an `AllocateBudget`'s total, its lines, and whether the two can add up at all.
+///
+/// The arithmetic is the agent's to get right and the human's to move, and the one thing worse
+/// than an unanswerable split is an impossible one: lines whose floors already exceed the total
+/// leave the human looking at a card that can never be sent, with no way to say so.
+fn validate_allocation(props: &Value) -> Result<(), String> {
+    let Some(obj) = props.as_object() else {
+        return Ok(());
+    };
+
+    let Some(total) = obj.get("total").and_then(Value::as_i64) else {
+        return Err(
+            "`props.total` must be a whole number for AllocateBudget: the figure the parts have to add up to."
+                .into(),
+        );
+    };
+    if total < 1 {
+        return Err(format!(
+            "`props.total` is {total} for AllocateBudget; a total of zero is nothing to hand out."
+        ));
+    }
+
+    if let Some(step) = obj.get("step") {
+        if !step.is_null() {
+            match step.as_i64() {
+                Some(number) if (1..=total).contains(&number) => {}
+                _ => {
+                    return Err(format!(
+                        "`props.step` for AllocateBudget must be a whole number between 1 and {total}: how far one press moves a line."
+                    ))
+                }
+            }
+        }
+    }
+
+    if let Some(flag) = obj.get("requireTotal") {
+        if !flag.is_null() && !flag.is_boolean() {
+            return Err("`props.requireTotal` for AllocateBudget must be true or false.".into());
+        }
+    }
+
+    let Some(items) = obj.get("items").and_then(Value::as_array) else {
+        return Ok(());
+    };
+    if items.is_empty() {
+        return Err(
+            "`props.items` is empty for AllocateBudget: there would be nothing to split the total between."
+                .into(),
+        );
+    }
+
+    let mut ids: Vec<&str> = Vec::new();
+    let mut floors: i64 = 0;
+    for (index, item) in items.iter().enumerate() {
+        let Some(item) = item.as_object() else {
+            return Err(format!(
+                "`props.items[{index}]` must be an object with an `id` and a `label`."
+            ));
+        };
+        let Some(id) = item
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+        else {
+            return Err(format!(
+                "`props.items[{index}].id` must be a non-empty string; the answer comes back keyed by it."
+            ));
+        };
+        if ids.contains(&id) {
+            return Err(format!(
+                "`props.items[{index}].id` is `{id}`, which another line already uses: the split could not be read back."
+            ));
+        }
+        if item.get("label").and_then(Value::as_str).is_none() {
+            return Err(format!(
+                "`props.items[{index}].label` must be a string: a line the human cannot read is one they cannot budget."
+            ));
+        }
+        if let Some(min) = item.get("min") {
+            if !min.is_null() {
+                match min.as_i64() {
+                    Some(number) if (0..=total).contains(&number) => floors += number,
+                    _ => {
+                        return Err(format!(
+                            "`props.items[{index}].min` must be a whole number between 0 and {total}."
+                        ))
+                    }
+                }
+            }
+        }
+        ids.push(id);
+    }
+
+    if floors > total {
+        return Err(format!(
+            "`props.items[].min` adds up to {floors}, more than `props.total` ({total}): the card could never reach its own total, so it would never be sendable."
+        ));
     }
 
     Ok(())
@@ -1333,5 +1634,140 @@ mod tests {
         assert!(message.contains("add") && message.contains("del"), "names all three: {message}");
 
         assert!(is_known_component("DiffReview"));
+    }
+
+    #[test]
+    fn validates_region_marks_that_can_actually_be_drawn() {
+        let mark = |props: Value| validate_props("RegionMark", &props);
+
+        assert!(mark(json!({"src": "https://example.com/shot.png"})).is_ok());
+        assert!(mark(json!({"src": "data:image/png;base64,AAAA", "mode": "point"})).is_ok());
+        assert!(mark(json!({
+            "src": "data:image/png;base64,AAAA",
+            "mode": null,
+            "width": 1280,
+            "height": 800
+        }))
+        .is_ok());
+
+        // The picture an agent actually has is a screenshot, which is a data URL. What this
+        // refuses is a socket on the machine naming an address of its own choosing.
+        assert!(mark(json!({"src": "http://example.com/shot.png"})).is_err());
+        assert!(mark(json!({"src": "file:///home/somebody/notes.txt"})).is_err());
+        assert!(mark(json!({"src": "data:text/html,<b>x</b>"})).is_err());
+        assert!(mark(json!({"src": ""})).is_err());
+        assert!(mark(json!({})).is_err());
+        assert!(mark(json!({"src": 7})).is_err());
+
+        assert!(mark(json!({"src": "https://x/y.png", "mode": "circle"})).is_err());
+        assert!(mark(json!({"src": "https://x/y.png", "width": 0})).is_err());
+        assert!(mark(json!({"src": "https://x/y.png", "height": -3})).is_err());
+        assert!(mark(json!({"src": "https://x/y.png", "width": "1280"})).is_err());
+
+        assert!(is_known_component("RegionMark"));
+    }
+
+    #[test]
+    fn validates_pair_matrix_rows_against_its_options() {
+        let matrix = |props: Value| validate_props("PairMatrix", &props);
+        let options = json!([
+            {"id": "auth", "label": "Signing in"},
+            {"id": "billing", "label": "Payments"}
+        ]);
+        let rows = json!([
+            {"id": "r1", "label": "Stripe charge failed"},
+            {"id": "r2", "label": "Token expired", "options": ["auth"]}
+        ]);
+
+        assert!(matrix(json!({"rows": rows, "options": options})).is_ok());
+        assert!(matrix(json!({"rows": rows, "options": options, "requireAll": false})).is_ok());
+
+        assert!(matrix(json!({"rows": [], "options": options})).is_err());
+        assert!(matrix(json!({"rows": rows, "options": []})).is_err());
+        assert!(matrix(json!({"rows": rows, "options": "auth"})).is_err());
+        assert!(matrix(json!({"rows": rows})).is_err());
+
+        // Both lists are keyed by id, and an id that repeats or goes missing has no answer.
+        assert!(matrix(json!({
+            "rows": rows,
+            "options": [{"id": "auth", "label": "A"}, {"id": "auth", "label": "B"}]
+        }))
+        .is_err());
+        assert!(matrix(json!({"rows": rows, "options": [{"id": "auth"}]})).is_err());
+        assert!(matrix(json!({"rows": rows, "options": [{"id": "", "label": "A"}]})).is_err());
+        assert!(matrix(json!({
+            "rows": [{"id": "r", "label": "A"}, {"id": "r", "label": "B"}],
+            "options": options
+        }))
+        .is_err());
+        assert!(matrix(json!({"rows": [{"id": "r"}], "options": options})).is_err());
+        assert!(matrix(json!({"rows": [7], "options": options})).is_err());
+
+        // A row narrowed to an option that does not exist is a line with nothing to press.
+        let refusal = matrix(json!({
+            "rows": [{"id": "r", "label": "X", "options": ["ghost"]}],
+            "options": options
+        }))
+        .expect_err("an unknown option id should be refused");
+        assert!(refusal.contains("ghost"), "should name it: {refusal}");
+        assert!(matrix(json!({
+            "rows": [{"id": "r", "label": "X", "options": []}],
+            "options": options
+        }))
+        .is_err());
+        assert!(matrix(json!({
+            "rows": [{"id": "r", "label": "X", "options": "auth"}],
+            "options": options
+        }))
+        .is_err());
+
+        assert!(is_known_component("PairMatrix"));
+    }
+
+    #[test]
+    fn validates_splits_that_can_add_up() {
+        let budget = |props: Value| validate_props("AllocateBudget", &props);
+        let items = json!([{"id": "a", "label": "A"}, {"id": "b", "label": "B"}]);
+
+        assert!(budget(json!({"total": 100, "items": items})).is_ok());
+        assert!(budget(json!({
+            "total": 10,
+            "items": [{"id": "a", "label": "A", "min": 10}],
+            "step": 5,
+            "requireTotal": false
+        }))
+        .is_ok());
+
+        assert!(budget(json!({"total": 0, "items": items})).is_err());
+        assert!(budget(json!({"total": 4.5, "items": items})).is_err());
+        assert!(budget(json!({"items": items})).is_err());
+        assert!(budget(json!({"total": 100, "items": []})).is_err());
+        assert!(budget(json!({"total": 100, "items": "a"})).is_err());
+
+        // The one failure worth catching before a window opens: floors that already overrun the
+        // total leave a card that can never be sent and never says why.
+        let refusal = budget(json!({
+            "total": 100,
+            "items": [{"id": "a", "label": "A", "min": 60}, {"id": "b", "label": "B", "min": 50}]
+        }))
+        .expect_err("impossible floors should be refused");
+        assert!(refusal.contains("110"), "should do the sum: {refusal}");
+
+        assert!(budget(json!({
+            "total": 100,
+            "items": [{"id": "a", "label": "A"}, {"id": "a", "label": "B"}]
+        }))
+        .is_err());
+        assert!(budget(json!({"total": 100, "items": [{"id": "a"}]})).is_err());
+        assert!(budget(json!({
+            "total": 100,
+            "items": [{"id": "a", "label": "A", "min": -1}]
+        }))
+        .is_err());
+        assert!(budget(json!({"total": 100, "items": items, "step": 0})).is_err());
+        assert!(budget(json!({"total": 100, "items": items, "step": 200})).is_err());
+        assert!(budget(json!({"total": 100, "items": items, "requireTotal": "yes"})).is_err());
+
+        assert!(is_known_component("AllocateBudget"));
     }
 }
