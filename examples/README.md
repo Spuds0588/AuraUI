@@ -47,15 +47,18 @@ controls how the script exits, not whether it asks.
 
 ## What the scripts walk through
 
+Every card asks exactly one question. Where a real report would be one long form, the
+scripts ask a run of single-question cards instead.
+
 | Step | Component | The question |
 | --- | --- | --- |
 | 1 | `ActionCard` | A deploy failed twice on staging. Investigate, roll back, or defer? |
-| 2 | `WizardForm` | A two-step incident report: what happened, and who to page. |
+| 2 | `ActionCard` / `WizardForm` | The incident interview, one question per card: where it broke, what it looked like, how urgent it is, whether to page. |
 | 3 | `DataGrid` | Which of six anomaly records best explains the failure? |
 | 4 | `SortableList` | Put the five rollout steps back in the safe order. |
 | 5 | `InteractiveChart` | Q3 revenue by region; click a bar to drill down. |
 | 6 | `RatingScale` | How confident are you in shipping the release, 1 to 5? |
-| 7 | `DiffReview` | Accept or reject each hunk of the cart fix. |
+| 7 | `DiffReview` | Each hunk of the cart fix, accept or reject, one hunk per card. |
 | 8 | `Notice` | A closing summary with one action. |
 
 Between steps the script calls `note()` to narrate progress. Only the newest note is ever on

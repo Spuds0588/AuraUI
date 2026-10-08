@@ -536,5 +536,7 @@ old card rather than stacking a second one.
 
 Environment: `AURAUI_HOST` (default `127.0.0.1`), `AURAUI_PORT` (default `9090`).
 
-Run `python3 examples/demo_agent.py` or `node examples/demo-agent.mjs` for a full eight-step
-walkthrough against a live bridge.
+Run `python3 examples/demo_agent.py` or `node examples/demo-agent.mjs` for a full walkthrough
+of all eight component kinds against a live bridge. Each card asks one question: the
+incident report is a run of single-question cards, and the patch is reviewed one hunk at a
+time.

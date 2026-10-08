@@ -83,7 +83,9 @@ python3 examples/demo_agent.py     # standard library only, nothing to install
 node examples/demo-agent.mjs       # uses the optional `ws` package (already installed)
 ```
 
-Both scripts walk the human through all eight components and print every exchange.
+Both scripts walk the human through all eight components and print every exchange. Each
+card asks one question, so the incident report is a short interview and the patch is
+reviewed one hunk at a time.
 
 To work on the canvas without a GUI, `npm run dev` serves it in a browser and drives it with
 a scripted in-browser agent, so every component is still inspectable.
@@ -142,7 +144,7 @@ The full frame reference, every prop shape and the error codes are in
 | `src-tauri/` | The Rust bridge: `tokio-tungstenite` server, Tauri commands, headless binary |
 | `clients/python/` | `auraui` — stdlib-only client, including a from-scratch RFC 6455 codec |
 | `clients/ts/` | `auraui-client` — plain ESM, hand-written types, no build step |
-| `examples/` | The same eight-step demo in both languages |
+| `examples/` | The same demo, one question per card, in both languages |
 | `docs/PROTOCOL.md` | The wire contract. Read this before writing an agent. |
 | `docs/REMOTE-AND-MOBILE.md` | Design note: reaching a phone, and what PeerJS would cost |
 

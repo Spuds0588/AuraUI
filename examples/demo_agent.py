@@ -2,10 +2,15 @@
 """AuraUI demo agent — the happy path, in one readable script.
 
 Walks a human through all eight AuraUI component kinds in turn: an ActionCard triage
-choice, a WizardForm incident report, a DataGrid row pick, a SortableList ordering, an
-InteractiveChart drill-down, a RatingScale confidence check, a DiffReview patch review,
-and a closing Notice. Every answer is printed as it arrives, so the script doubles as a
-smoke test of the whole loop.
+choice, a short WizardForm/ActionCard incident interview, a DataGrid row pick, a
+SortableList ordering, an InteractiveChart drill-down, a RatingScale confidence check,
+a per-hunk DiffReview, and a closing Notice. Every answer is printed as it arrives, so
+the script doubles as a smoke test of the whole loop.
+
+Every card asks exactly one question. AuraUI shows one question at a time, so a card that
+packs several parts would be answered in part: the incident report is therefore a run of
+single-question cards rather than one long form, and the patch is reviewed one hunk at a
+time rather than as a wall of decisions.
 
 Run it from the repository root, with the AuraUI window open:
 
@@ -197,17 +202,38 @@ def run(agent: Agent) -> None:
     choice = (triage.get("payload") or {}).get("actionId", "unknown")
     agent.note(f"Recorded the triage decision: {choice}.", kind="progress")
 
-    # 2. WizardForm --------------------------------------------------------
-    report = ask(
+    # 2. WizardForm / ActionCard, one question per card --------------------
+    # The incident report is an interview, not a form. A card asks one question, so the
+    # questions that are a choice between named outcomes are an ActionCard — one press —
+    # and the ones that need typing are a single-field WizardForm.
+    area = ask(
         agent,
-        "WizardForm (2 steps) incident report",
+        'ActionCard "Where did it break?"',
+        component="ActionCard",
+        instruction="Where did it break? I will start with this suite and widen if it looks clean.",
+        props=c.action_card(
+            [
+                c.option("checkout", "Checkout", variant="primary"),
+                c.option("search", "Search"),
+                c.option("auth", "Auth"),
+                c.option("billing", "Billing"),
+                c.option("unsure", "Not sure", variant="ghost"),
+            ],
+            columns=2,
+        ),
+    )
+    area_choice = (area.get("payload") or {}).get("actionId", "unknown")
+
+    symptom = ask(
+        agent,
+        'WizardForm "Describe the failure"',
         component="WizardForm",
-        instruction="Two quick questions so the incident report is accurate.",
+        instruction="What does it look like? Anything you noticed that the logs would not show.",
         props=c.wizard_form(
             [
                 c.step(
-                    "what",
-                    "What happened",
+                    "symptom",
+                    "What you saw",
                     [
                         c.field(
                             "description",
@@ -217,43 +243,50 @@ def run(agent: Agent) -> None:
                             required=True,
                             help="Your words are quoted in the incident report.",
                         ),
-                        c.field(
-                            "severity",
-                            "Severity",
-                            "choice",
-                            options=[
-                                c.field_option("sev1", "SEV1 - customer impact"),
-                                c.field_option("sev2", "SEV2 - degraded"),
-                                c.field_option("sev3", "SEV3 - internal only"),
-                            ],
-                            default="sev2",
-                        ),
-                    ],
-                    description="Only you saw the screen.",
-                ),
-                c.step(
-                    "who",
-                    "Who should be paged",
-                    [
-                        c.field("oncall", "On-call engineer", placeholder="name or handle"),
-                        c.field(
-                            "include_logs",
-                            "Attach the failing job logs?",
-                            "choice",
-                            default="yes",
-                            options=[
-                                c.field_option("yes", "Attach them", "The last 200 lines, in full"),
-                                c.field_option("no", "Keep it short", "Just the report I write"),
-                            ],
-                            help="Adds the last 200 log lines to the report.",
-                        ),
                     ],
                 ),
             ],
-            submit_label="File the report",
+            submit_label="Next",
         ),
     )
-    agent.note(f"Filed an incident report with {len((report.get('payload') or {}).get('values') or {})} fields.")
+
+    severity = ask(
+        agent,
+        'ActionCard "How urgent is it?"',
+        component="ActionCard",
+        instruction="How urgent is it? This decides whether I page someone or just file it.",
+        props=c.action_card(
+            [
+                c.option("sev1", "SEV1 - customer impact", variant="primary"),
+                c.option("sev2", "SEV2 - degraded"),
+                c.option("sev3", "SEV3 - internal only", variant="ghost"),
+            ],
+            columns=1,
+        ),
+    )
+    severity_choice = (severity.get("payload") or {}).get("actionId", "unknown")
+
+    paged = ask(
+        agent,
+        'ActionCard "Page the on-call engineer?"',
+        component="ActionCard",
+        instruction=(
+            "Page the on-call engineer? Only outside working hours if checkout is truly down."
+        ),
+        props=c.action_card(
+            [
+                c.option("no", "File it instead", "Picked up in the morning", variant="primary"),
+                c.option("yes", "Page them now", "Wakes someone up tonight", variant="destructive"),
+            ],
+            columns=2,
+        ),
+    )
+    paged_choice = (paged.get("payload") or {}).get("actionId", "unknown")
+
+    print(f"  (interview: area={area_choice}, severity={severity_choice}, page={paged_choice})\n")
+    agent.note(
+        f"Interview recorded: area={area_choice}, severity={severity_choice}, page={paged_choice}."
+    )
 
     # 3. DataGrid ----------------------------------------------------------
     picked = ask(
@@ -340,22 +373,27 @@ def run(agent: Agent) -> None:
     confidence_word = (rated.get("payload") or {}).get("label") or "no word for it"
     agent.note(f"Confidence {confidence}/5 ({confidence_word}).", kind="progress")
 
-    # 7. DiffReview --------------------------------------------------------
-    review = ask(
-        agent,
-        f"DiffReview {len(PATCH_HUNKS)} hunks of the cart fix",
-        component="DiffReview",
-        instruction="Here is the fix for the checkout regression. Accept or reject each hunk "
-                    "and I will apply exactly what you approve.",
-        props=c.diff_review(
-            PATCH_HUNKS,
-            title=f"packages/cart — {len(PATCH_HUNKS)} hunks",
-            submit_label="Apply my decision",
-            footnote="Every hunk needs a decision before I touch the branch.",
-        ),
-    )
-    accepted = (review.get("payload") or {}).get("accepted") or []
-    rejected = (review.get("payload") or {}).get("rejected") or []
+    # 7. DiffReview, one hunk per card ------------------------------------
+    # A DiffReview is a decision per hunk, so two hunks on one card would be two questions.
+    # Each hunk comes in alone, with its own file header as the title.
+    accepted: List[str] = []
+    rejected: List[str] = []
+    for index, hunk in enumerate(PATCH_HUNKS):
+        review = ask(
+            agent,
+            f"DiffReview hunk {index + 1} of {len(PATCH_HUNKS)}",
+            component="DiffReview",
+            instruction=f"Hunk {index + 1} of {len(PATCH_HUNKS)}. Accept or reject this one "
+                        "on its own, and I will apply exactly what you approve.",
+            props=c.diff_review(
+                [hunk],
+                title=hunk.get("header"),
+                submit_label="Decide this hunk",
+                footnote="This hunk needs a decision before I touch the branch.",
+            ),
+        )
+        accepted.extend((review.get("payload") or {}).get("accepted") or [])
+        rejected.extend((review.get("payload") or {}).get("rejected") or [])
     print(f"  (review: {len(accepted)} accepted, {len(rejected)} rejected)")
     print()
 

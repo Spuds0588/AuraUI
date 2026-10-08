@@ -58,7 +58,9 @@ export default function TaskFrame({ task, respond, dismiss, expiresIn }: TaskFra
     <article
       aria-label="Question from the agent"
       className={cn(
-        "animate-fade-up overflow-hidden rounded-2xl border bg-card shadow-xl",
+        // Motion is owned by the wrapper in App.tsx: the same card has to be able to enter
+        // from the right or leave to the left depending on where the queue is.
+        "overflow-hidden rounded-2xl border bg-card shadow-xl",
         orphaned
           ? "border-amber-500/40"
           : resolved

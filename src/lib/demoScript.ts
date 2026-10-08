@@ -6,8 +6,14 @@ import { PROTOCOL_VERSION } from "./protocol";
  *
  * `npm run dev` in a browser has no Rust bridge and no agent, which makes the renderer
  * impossible to look at while you are working on it. This plays a realistic HITL session
- * covering all six component kinds, and answers each interaction with the next step the
+ * covering all eight component kinds, and answers each interaction with the next step the
  * way a real agent would. It is a development aid, never part of the desktop runtime.
+ *
+ * One rule shapes the whole script: **one card is one question**. A card that asks two things
+ * is a card a human answers half of, so the interview below is a run of single-question
+ * cards rather than one long form, and the patch is reviewed one hunk at a time rather than
+ * as a wall of decisions. Choosing several options in one question (`multi`) is still one
+ * question, and a list to order is still one question.
  */
 
 export interface DemoFrame {
@@ -59,7 +65,7 @@ const PATCH_HUNKS = [
     header: "packages/cart/src/reducer.ts  @@ -18,7 +18,8 @@",
     lines: [
       { kind: "context" as const, text: "  switch (action.type) {" },
-      { kind: "context" as const, text: "    case \"ADD_ITEM\": {" },
+      { kind: "context" as const, text: '    case "ADD_ITEM": {' },
       { kind: "del" as const, text: "-      const next = [...state.items, action.item];" },
       { kind: "add" as const, text: "+      if (!action.item?.id) return state;" },
       { kind: "add" as const, text: "+      const next = [...state.items, action.item];" },
@@ -80,13 +86,246 @@ const PATCH_HUNKS = [
   },
 ];
 
+/* ------------------------------------------------------------------ *
+ * Fixtures for the single-question cards
+ * ------------------------------------------------------------------ */
+
 /**
- * The last leg of the scripted session: a scale, then a patch to review, then the close.
+ * The incident report, as a short interview rather than one form.
  *
- * Both exist to keep the demo honest about what the canvas can draw. A scale and a diff
- * review are questions an agent genuinely needs to ask, and neither of them is a checkbox,
- * a radio button or a dropdown.
+ * Each id below is one question. A `WizardForm` carries the questions that need typing; the
+ * ones that are a choice between named outcomes are an `ActionCard`, because a choice is one
+ * press and does not deserve a form. Splitting this out of a single multi-step wizard is
+ * deliberate: a wizard step that shows four fields at once is four questions in a trench
+ * coat, and the canvas only ever promises one.
  */
+const INCIDENT_QUESTION_IDS = [
+  "incident-area",
+  "incident-symptom",
+  "incident-severity",
+  "incident-page",
+  "incident-notify",
+  "incident-when",
+] as const;
+
+/** The frame for one interview question, or undefined for an id that is not one. */
+function incidentQuestion(id: string): AgentFrame | undefined {
+  switch (id) {
+    case "incident-area":
+      return frame("task", {
+        taskId: id,
+        component: "ActionCard",
+        instruction:
+          "Where did it break? I will start with this suite and widen if it looks clean.",
+        props: {
+          columns: 2,
+          options: [
+            { id: "checkout", label: "Checkout", variant: "primary" },
+            { id: "search", label: "Search" },
+            { id: "auth", label: "Auth" },
+            { id: "billing", label: "Billing" },
+            { id: "unsure", label: "Not sure", variant: "ghost" },
+          ],
+        },
+      });
+
+    case "incident-symptom":
+      return frame("task", {
+        taskId: id,
+        component: "WizardForm",
+        instruction:
+          "What does it look like? Anything you noticed that the logs would not show.",
+        props: {
+          submitLabel: "Next",
+          steps: [
+            {
+              id: "symptom",
+              title: "What you saw",
+              fields: [
+                {
+                  name: "symptom",
+                  label: "Describe it in your own words",
+                  type: "textarea",
+                  placeholder: "e.g. the spinner never resolves after the payment step",
+                  validate: { maxLength: 600 },
+                },
+              ],
+            },
+          ],
+        },
+      });
+
+    case "incident-severity":
+      return frame("task", {
+        taskId: id,
+        component: "ActionCard",
+        instruction:
+          "How urgent is it? This decides whether I page someone or just file it.",
+        props: {
+          columns: 1,
+          options: [
+            {
+              id: "blocking",
+              label: "Blocking a release",
+              description: "Nothing ships until this is fixed",
+              variant: "primary",
+            },
+            {
+              id: "degraded",
+              label: "Degraded but usable",
+              description: "Slow, but people can still finish",
+            },
+            {
+              id: "cosmetic",
+              label: "Cosmetic",
+              description: "Wrong, and nobody is blocked by it",
+              variant: "ghost",
+            },
+          ],
+        },
+      });
+
+    case "incident-page":
+      return frame("task", {
+        taskId: id,
+        component: "ActionCard",
+        instruction:
+          "Page the on-call engineer? Only outside working hours if checkout is truly down.",
+        props: {
+          columns: 2,
+          options: [
+            {
+              id: "yes",
+              label: "Page them now",
+              description: "Wakes someone up tonight",
+              variant: "destructive",
+            },
+            {
+              id: "no",
+              label: "File it instead",
+              description: "Picked up in the morning",
+              variant: "primary",
+            },
+          ],
+        },
+      });
+
+    case "incident-notify":
+      return frame("task", {
+        taskId: id,
+        component: "WizardForm",
+        instruction: "Who should get this report? Pick as many as you like.",
+        props: {
+          submitLabel: "Next",
+          steps: [
+            {
+              id: "notify",
+              title: "Recipients",
+              fields: [
+                {
+                  name: "notify",
+                  label: "Who should get this report?",
+                  type: "multi",
+                  defaultValue: ["checkout"],
+                  options: [
+                    { value: "checkout", label: "Checkout" },
+                    { value: "payments", label: "Payments" },
+                    { value: "platform", label: "Platform" },
+                    { value: "mobile", label: "Mobile" },
+                  ],
+                  help: "Pick as many as you like. Every answer comes back as one array.",
+                },
+              ],
+            },
+          ],
+        },
+      });
+
+    case "incident-when":
+      return frame("task", {
+        taskId: id,
+        component: "WizardForm",
+        instruction: "Last one: when did you first see it?",
+        props: {
+          submitLabel: "Send report",
+          steps: [
+            {
+              id: "when",
+              title: "Timing",
+              fields: [
+                {
+                  name: "reported_at",
+                  label: "When did you first see it?",
+                  type: "date",
+                  required: true,
+                },
+              ],
+            },
+          ],
+        },
+      });
+
+    default:
+      return undefined;
+  }
+}
+
+/** The one row-picking question, reused by the interview and by the triage branch. */
+function anomalyFrame(): AgentFrame {
+  return frame("task", {
+    taskId: "anomaly",
+    component: "DataGrid",
+    instruction:
+      "Five smoke runs are in range. Select the one you want me to bisect first, then submit.",
+    props: {
+      selectMode: "single",
+      sortable: true,
+      filterable: true,
+      pageSize: 5,
+      submitLabel: "Bisect this run",
+      rowKey: "id",
+      columns: [
+        { key: "id", header: "Run", type: "mono" },
+        { key: "suite", header: "Suite" },
+        { key: "duration", header: "Duration", type: "number", align: "right" },
+        { key: "delta", header: "vs median", type: "number", align: "right" },
+        { key: "verdict", header: "Verdict", type: "badge" },
+      ],
+      rows: ANOMALY_ROWS,
+    },
+  });
+}
+
+/**
+ * One hunk, on its own card.
+ *
+ * A `DiffReview` is a decision per hunk, so handing it two hunks is two questions on one
+ * card. Each hunk arrives alone, with its own file header as the title.
+ */
+function diffFrame(taskId: string, index: number): AgentFrame {
+  const hunk = PATCH_HUNKS[index];
+  if (!hunk) {
+    return frame("note", { text: "There is nothing left to review.", kind: "meta" });
+  }
+  return frame("task", {
+    taskId,
+    component: "DiffReview",
+    instruction:
+      `Hunk ${index + 1} of ${PATCH_HUNKS.length}. Accept or reject this one on its own, ` +
+      "and I will apply exactly what you approve.",
+    props: {
+      title: hunk.header,
+      submitLabel: "Decide this hunk",
+      footnote: "This hunk needs a decision before I touch the branch.",
+      hunks: [hunk],
+    },
+  });
+}
+
+/* ------------------------------------------------------------------ *
+ * The script
+ * ------------------------------------------------------------------ */
+
 export function demoOpening(): DemoFrame[] {
   return [
     {
@@ -188,6 +427,32 @@ export function demoReply(
 ): DemoFrame[] {
   const p = (payload ?? {}) as Record<string, unknown>;
 
+  // The incident interview: one question per card, each answer leading to the next question.
+  const incidentIndex = (INCIDENT_QUESTION_IDS as readonly string[]).indexOf(taskId);
+  if (incidentIndex !== -1) {
+    if (event !== "action" && event !== "submit") return [];
+    const recorded = event === "action" ? String(p.actionId ?? "no choice") : "answer";
+    const nextId = (INCIDENT_QUESTION_IDS as readonly string[])[incidentIndex + 1];
+    if (!nextId) {
+      return [
+        {
+          delay: 140,
+          frame: frame("note", {
+            text: "Report received. Ranking the failing runs by their duration delta.",
+            kind: "progress",
+          }),
+        },
+        { delay: 200, frame: anomalyFrame() },
+      ];
+    }
+    return [        {
+          delay: 140,
+          frame: frame("note", { text: `Recorded: ${recorded}.`, kind: "progress" }),
+        },
+        { delay: 180, frame: incidentQuestion(nextId)! },
+    ];
+  }
+
   switch (taskId) {
     case "triage": {
       if (event !== "action") return [];
@@ -249,130 +514,16 @@ export function demoReply(
         ];
       }
 
-      // investigate
+      // investigate — begin the interview. One question at a time from here on.
       return [
         {
-          delay: 300,
+          delay: 140,
           frame: frame("note", {
             text: "Pulling the two failing runs apart. I need context only you have.",
             kind: "progress",
           }),
         },
-        {
-          delay: 500,
-          frame: frame("task", {
-            taskId: "incident",
-            component: "WizardForm",
-            instruction: "Two questions, then I can tell you which suite to look at first.",
-            props: {
-              submitLabel: "Send report",
-              steps: [
-                {
-                  id: "symptom",
-                  title: "What you saw",
-                  description: "Anything you noticed that the logs would not show.",
-                  fields: [
-                    {
-                      name: "area",
-                      label: "Where did it break?",
-                      type: "choice",
-                      required: true,
-                      defaultValue: "checkout",
-                      options: [
-                        { value: "checkout", label: "Checkout" },
-                        { value: "search", label: "Search" },
-                        { value: "auth", label: "Auth" },
-                        { value: "billing", label: "Billing" },
-                        {
-                          value: "unsure",
-                          label: "Not sure",
-                          description: "I will widen the search instead of guessing",
-                        },
-                      ],
-                      help: "I will start with this suite and widen if it looks clean.",
-                    },
-                    {
-                      name: "symptom",
-                      label: "What does it look like?",
-                      type: "textarea",
-                      placeholder: "e.g. the spinner never resolves after the payment step",
-                      validate: { maxLength: 600 },
-                    },
-                  ],
-                },
-                {
-                  id: "response",
-                  title: "How urgent",
-                  description: "This decides whether I page someone or just file it.",
-                  fields: [
-                    {
-                      name: "severity",
-                      label: "Severity",
-                      type: "choice",
-                      required: true,
-                      defaultValue: "blocking",
-                      options: [
-                        {
-                          value: "blocking",
-                          label: "Blocking a release",
-                          description: "Nothing ships until this is fixed",
-                        },
-                        {
-                          value: "degraded",
-                          label: "Degraded but usable",
-                          description: "Slow, but people can still finish",
-                        },
-                        {
-                          value: "cosmetic",
-                          label: "Cosmetic",
-                          description: "Wrong, and nobody is blocked by it",
-                        },
-                      ],
-                    },
-                    {
-                      name: "page_oncall",
-                      label: "Page the on-call engineer?",
-                      type: "choice",
-                      required: true,
-                      defaultValue: "no",
-                      options: [
-                        {
-                          value: "yes",
-                          label: "Page them now",
-                          description: "Wakes someone up tonight",
-                        },
-                        {
-                          value: "no",
-                          label: "File it instead",
-                          description: "Picked up in the morning",
-                        },
-                      ],
-                      help: "Only do this outside working hours if checkout is truly down.",
-                    },
-                    {
-                      name: "notify",
-                      label: "Who should get this report?",
-                      type: "multi",
-                      defaultValue: ["checkout"],
-                      options: [
-                        { value: "checkout", label: "Checkout" },
-                        { value: "payments", label: "Payments" },
-                        { value: "platform", label: "Platform" },
-                        { value: "mobile", label: "Mobile" },
-                      ],
-                      help: "Pick as many as you like. Every answer comes back as one array.",
-                    },
-                    {
-                      name: "reported_at",
-                      label: "When did you first see it?",
-                      type: "date",
-                    },
-                  ],
-                },
-              ],
-            },
-          }),
-        },
+        { delay: 180, frame: incidentQuestion("incident-area")! },
       ];
     }
 
@@ -397,51 +548,6 @@ export function demoReply(
       ];
     }
 
-    case "incident": {
-      if (event !== "submit") return [];
-      const values = (p.values ?? {}) as Record<string, unknown>;
-      const area = String(values.area ?? "the suite");
-      const severity = String(values.severity ?? "unknown");
-      // The `multi` field arrives as an array. Reading it here is the point: a button array
-      // is not a nicer-looking checkbox, it is a list on the wire.
-      const notified = Array.isArray(values.notify) ? values.notify.map(String) : [];
-
-      return [
-        {
-          delay: 300,
-          frame: frame("note", {
-            text: `Report received (area=${area}, severity=${severity}, notify=[${notified.join(", ")}]). Ranking the failing runs by their duration delta.`,
-            kind: "progress",
-          }),
-        },
-        {
-          delay: 600,
-          frame: frame("task", {
-            taskId: "anomaly",
-            component: "DataGrid",
-            instruction:
-              "Five smoke runs are in range. Select the one you want me to bisect first, then submit.",
-            props: {
-              selectMode: "single",
-              sortable: true,
-              filterable: true,
-              pageSize: 5,
-              submitLabel: "Bisect this run",
-              rowKey: "id",
-              columns: [
-                { key: "id", header: "Run", type: "mono" },
-                { key: "suite", header: "Suite" },
-                { key: "duration", header: "Duration", type: "number", align: "right" },
-                { key: "delta", header: "vs median", type: "number", align: "right" },
-                { key: "verdict", header: "Verdict", type: "badge" },
-              ],
-              rows: ANOMALY_ROWS,
-            },
-          }),
-        },
-      ];
-    }
-
     case "anomaly": {
       if (event !== "submit" && event !== "select") return [];
       const rowIds = Array.isArray(p.rowIds) ? (p.rowIds as string[]) : [];
@@ -455,11 +561,11 @@ export function demoReply(
       }
       return [
         {
-          delay: 300,
+          delay: 140,
           frame: frame("note", { text: `Bisecting ${rowIds.join(", ")}. Expected diff: the checkout cart reducer.`, kind: "progress" }),
         },
         {
-          delay: 500,
+          delay: 180,
           frame: frame("task", {
             taskId: "rollout",
             component: "SortableList",
@@ -485,14 +591,14 @@ export function demoReply(
       const order = Array.isArray(p.order) ? (p.order as string[]) : [];
       return [
         {
-          delay: 300,
+          delay: 140,
           frame: frame("note", {
             text: `Plan accepted: ${order.join(" → ")}. While that runs, here is the revenue picture that made this release worth shipping.`,
             kind: "progress",
           }),
         },
         {
-          delay: 600,
+          delay: 180,
           frame: frame("task", {
             taskId: "revenue",
             component: "InteractiveChart",
@@ -540,36 +646,36 @@ export function demoReply(
 
       return [
         {
-          delay: 300,
+          delay: 140,
           frame: frame("note", { text: `Drill-down queued for ${region}.`, kind: "progress" }),
         },
-    {
-      delay: 500,
-      frame: frame("task", {
-        taskId: "rating",
-        component: "RatingScale",
-        instruction:
-          `Noted: ${region} contributed ${typeof row.sales === "number" ? row.sales : "?"} in revenue. ` +
-          "How confident are you in this release, after everything you have just seen?",
-        props: {
-          min: 1,
-          max: 5,
-          defaultValue: 3,
-          labels: [
-            "Ship it and walk away",
-            "Ship it, but watch the graphs",
-            "Not sure yet",
-            "I would hold the release",
-            "Something is wrong",
-          ],
-          legend: { low: "confident", high: "worried" },
-          submitLabel: "Send my confidence",
-          help: "One press. No slider to drag, no dropdown to open.",
+        {
+          delay: 180,
+          frame: frame("task", {
+            taskId: "rating",
+            component: "RatingScale",
+            instruction:
+              `Noted: ${region} contributed ${typeof row.sales === "number" ? row.sales : "?"} in revenue. ` +
+              "How confident are you in this release, after everything you have just seen?",
+            props: {
+              min: 1,
+              max: 5,
+              defaultValue: 3,
+              labels: [
+                "Ship it and walk away",
+                "Ship it, but watch the graphs",
+                "Not sure yet",
+                "I would hold the release",
+                "Something is wrong",
+              ],
+              legend: { low: "confident", high: "worried" },
+              submitLabel: "Send my confidence",
+              help: "One press. No slider to drag, no dropdown to open.",
+            },
+          }),
         },
-      }),
-    },
-  ];
-}
+      ];
+    }
 
     case "rating": {
       if (event !== "submit") return [];
@@ -577,44 +683,39 @@ export function demoReply(
       const verdict = typeof p.label === "string" ? p.label : "no word for it";
       return [
         {
-          delay: 300,
+          delay: 140,
           frame: frame("note", {
-            text: `Confidence recorded: ${confidence} (${verdict}). I have a patch for the cart reducer that needs your eyes before it ships.`,
+            text: `Confidence recorded: ${confidence} (${verdict}). I have a patch for the cart reducer. One hunk at a time, so you can weigh each on its own.`,
             kind: "progress",
           }),
         },
-        {
-          delay: 500,
-          frame: frame("task", {
-            taskId: "diff",
-            component: "DiffReview",
-            instruction:
-              "Two hunks. Accept or reject each one, and I will apply exactly what you approve.",
-            props: {
-              title: "The fix for the checkout regression",
-              submitLabel: "Apply my decision",
-              footnote: "Every hunk needs a decision before I touch the branch.",
-              hunks: PATCH_HUNKS,
-            },
-          }),
-        },
+        { delay: 180, frame: diffFrame("diff-reducer", 0) },
       ];
     }
 
-    case "diff": {
+    // The two hunks are asked one at a time rather than on one card.
+    case "diff-reducer":
       if (event !== "submit") return [];
-      const accepted = Array.isArray(p.accepted) ? (p.accepted as string[]) : [];
-      const rejected = Array.isArray(p.rejected) ? (p.rejected as string[]) : [];
       return [
         {
-          delay: 300,
+          delay: 140,
           frame: frame("note", {
-            text: `Patch reviewed: ${accepted.length} accepted, ${rejected.length} rejected.`,
+            text: "First hunk decided. Here is the second, on its own.",
             kind: "progress",
           }),
         },
+        { delay: 180, frame: diffFrame("diff-totals", 1) },
+      ];
+
+    case "diff-totals": {
+      if (event !== "submit") return [];
+      return [
         {
-          delay: 500,
+          delay: 140,
+          frame: frame("note", { text: "Both hunks decided. Applying exactly what you approved.", kind: "progress" }),
+        },
+        {
+          delay: 200,
           frame: frame("task", {
             taskId: "wrap-up",
             component: "Notice",
@@ -622,11 +723,12 @@ export function demoReply(
             props: {
               level: "success",
               title: "Patch reviewed",
-              body: `${accepted.length} of ${accepted.length + rejected.length} hunks applied. The rest are parked for you.`,
+              body: "Each hunk got its own decision, and I will apply exactly the ones you accepted. The rest stay parked for you.",
               bullets: [
                 "Every answer you gave came back as a JSON event on the socket, not as a screenshot",
                 "The chart data and the diff both came from the agent, so nothing on the canvas was invented",
                 "All eight question kinds ran, and not one of them is a checkbox, a radio button or a dropdown",
+                "Each card asked one question, so nothing was half-answered",
                 "Run the same session against the desktop app and the answers arrive identically",
               ],
               actions: [

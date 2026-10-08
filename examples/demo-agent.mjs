@@ -3,10 +3,15 @@
  * AuraUI demo agent — the happy path, in one readable script.
  *
  * Walks a human through all eight AuraUI component kinds in turn: an ActionCard triage
- * choice, a WizardForm incident report, a DataGrid row pick, a SortableList ordering, an
- * InteractiveChart drill-down, a RatingScale confidence check, a DiffReview patch review,
- * and a closing Notice. Every answer is printed as it arrives, so the script doubles as a
- * smoke test of the whole loop.
+ * choice, a short WizardForm/ActionCard incident interview, a DataGrid row pick, a
+ * SortableList ordering, an InteractiveChart drill-down, a RatingScale confidence check,
+ * a per-hunk DiffReview, and a closing Notice. Every answer is printed as it arrives, so
+ * the script doubles as a smoke test of the whole loop.
+ *
+ * Every card asks exactly one question. AuraUI shows one question at a time, so a card that
+ * packs several parts would be answered in part: the incident report is therefore a run of
+ * single-question cards rather than one long form, and the patch is reviewed one hunk at a
+ * time rather than as a wall of decisions.
  *
  * Run it from the repository root, with the AuraUI window open:
  *
@@ -176,51 +181,78 @@ async function run(agent) {
   const choice = triage.payload?.actionId ?? "unknown";
   agent.note(`Recorded the triage decision: ${choice}.`, "progress");
 
-  // 2. WizardForm ---------------------------------------------------------
-  const report = await ask(agent, "WizardForm (2 steps) incident report", {
+  // 2. WizardForm / ActionCard, one question per card ---------------------
+  // The incident report is an interview, not a form. A card asks one question, so the
+  // questions that are a choice between named outcomes are an ActionCard — one press — and
+  // the ones that need typing are a single-field WizardForm.
+  const area = await ask(agent, 'ActionCard "Where did it break?"', {
+    component: "ActionCard",
+    instruction: "Where did it break? I will start with this suite and widen if it looks clean.",
+    props: c.actionCard(
+      [
+        c.option("checkout", "Checkout", { variant: "primary" }),
+        c.option("search", "Search"),
+        c.option("auth", "Auth"),
+        c.option("billing", "Billing"),
+        c.option("unsure", "Not sure", { variant: "ghost" }),
+      ],
+      { columns: 2 },
+    ),
+  });
+  const areaChoice = area.payload?.actionId ?? "unknown";
+
+  const symptom = await ask(agent, 'WizardForm "Describe the failure"', {
     component: "WizardForm",
-    instruction: "Two quick questions so the incident report is accurate.",
+    instruction: "What does it look like? Anything you noticed that the logs would not show.",
     props: c.wizardForm(
       [
-        c.step(
-          "what",
-          "What happened",
-          [
-            c.field("description", "Describe the failure", {
-              type: "textarea",
-              placeholder: "The second deploy timed out during the health check...",
-              required: true,
-              help: "Your words are quoted in the incident report.",
-            }),
-            c.field("severity", "Severity", {
-              type: "choice",
-              options: [
-                c.fieldOption("sev1", "SEV1 - customer impact"),
-                c.fieldOption("sev2", "SEV2 - degraded"),
-                c.fieldOption("sev3", "SEV3 - internal only"),
-              ],
-              defaultValue: "sev2",
-            }),
-          ],
-          { description: "Only you saw the screen." },
-        ),
-        c.step("who", "Who should be paged", [
-          c.field("oncall", "On-call engineer", { placeholder: "name or handle" }),
-          c.field("include_logs", "Attach the failing job logs?", {
-            type: "choice",
-            defaultValue: "yes",
-            options: [
-              c.fieldOption("yes", "Attach them", "The last 200 lines, in full"),
-              c.fieldOption("no", "Keep it short", "Just the report I write"),
-            ],
-            help: "Adds the last 200 log lines to the report.",
+        c.step("symptom", "What you saw", [
+          c.field("description", "Describe the failure", {
+            type: "textarea",
+            placeholder: "The second deploy timed out during the health check...",
+            required: true,
+            help: "Your words are quoted in the incident report.",
           }),
         ]),
       ],
-      { submitLabel: "File the report" },
+      { submitLabel: "Next" },
     ),
   });
-  agent.note(`Filed an incident report with ${Object.keys(report.payload?.values ?? {}).length} fields.`);
+
+  const severity = await ask(agent, 'ActionCard "How urgent is it?"', {
+    component: "ActionCard",
+    instruction: "How urgent is it? This decides whether I page someone or just file it.",
+    props: c.actionCard(
+      [
+        c.option("sev1", "SEV1 - customer impact", { variant: "primary" }),
+        c.option("sev2", "SEV2 - degraded"),
+        c.option("sev3", "SEV3 - internal only", { variant: "ghost" }),
+      ],
+      { columns: 1 },
+    ),
+  });
+  const severityChoice = severity.payload?.actionId ?? "unknown";
+
+  const paged = await ask(agent, 'ActionCard "Page the on-call engineer?"', {
+    component: "ActionCard",
+    instruction:
+      "Page the on-call engineer? Only outside working hours if checkout is truly down.",
+    props: c.actionCard(
+      [
+        c.option("no", "File it instead", { description: "Picked up in the morning", variant: "primary" }),
+        c.option("yes", "Page them now", { description: "Wakes someone up tonight", variant: "destructive" }),
+      ],
+      { columns: 2 },
+    ),
+  });
+  const pagedChoice = paged.payload?.actionId ?? "unknown";
+
+  console.log(
+    `  (interview: area=${areaChoice}, severity=${severityChoice}, page=${pagedChoice})\n`,
+  );
+  agent.note(
+    `Interview recorded: area=${areaChoice}, severity=${severityChoice}, page=${pagedChoice}.`,
+  );
 
   // 3. DataGrid -----------------------------------------------------------
   const picked = await ask(agent, `DataGrid ${ANOMALIES.length} anomaly candidates, single select`, {
@@ -292,20 +324,26 @@ async function run(agent) {
   const confidenceWord = rated.payload?.label ?? "no word for it";
   agent.note(`Confidence ${confidence}/5 (${confidenceWord}).`, "progress");
 
-  // 7. DiffReview --------------------------------------------------------
-  const review = await ask(agent, `DiffReview ${PATCH_HUNKS.length} hunks of the cart fix`, {
-    component: "DiffReview",
-    instruction:
-      "Here is the fix for the checkout regression. Accept or reject each hunk and I will " +
-      "apply exactly what you approve.",
-    props: c.diffReview(PATCH_HUNKS, {
-      title: `packages/cart — ${PATCH_HUNKS.length} hunks`,
-      submitLabel: "Apply my decision",
-      footnote: "Every hunk needs a decision before I touch the branch.",
-    }),
-  });
-  const accepted = review.payload?.accepted ?? [];
-  const rejected = review.payload?.rejected ?? [];
+  // 7. DiffReview, one hunk per card ------------------------------------
+  // A DiffReview is a decision per hunk, so two hunks on one card would be two questions.
+  // Each hunk comes in alone, with its own file header as the title.
+  const accepted = [];
+  const rejected = [];
+  for (let i = 0; i < PATCH_HUNKS.length; i += 1) {
+    const review = await ask(agent, `DiffReview hunk ${i + 1} of ${PATCH_HUNKS.length}`, {
+      component: "DiffReview",
+      instruction:
+        `Hunk ${i + 1} of ${PATCH_HUNKS.length}. Accept or reject this one on its own, and I ` +
+        "will apply exactly what you approve.",
+      props: c.diffReview([PATCH_HUNKS[i]], {
+        title: PATCH_HUNKS[i].header,
+        submitLabel: "Decide this hunk",
+        footnote: "This hunk needs a decision before I touch the branch.",
+      }),
+    });
+    accepted.push(...(review.payload?.accepted ?? []));
+    rejected.push(...(review.payload?.rejected ?? []));
+  }
   console.log(`  (review: ${accepted.length} accepted, ${rejected.length} rejected)`);
   console.log();
 
