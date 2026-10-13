@@ -52,7 +52,7 @@ Eleven component kinds, all verified end to end:
 | `InteractiveChart` | Click a bar to drill into the real data | `filter` |
 | `RatingScale` | Press a point on a bounded scale | `submit` |
 | `DiffReview` | Accept or reject each hunk of a change | `submit` |
-| `RegionMark` | Draw a box on the picture you were sent | `submit` |
+| `RegionMark` | Draw on the picture you were sent: boxes, circles, arrows, Xs, freehand | `submit` |
 | `PairMatrix` | Send each item to the option it belongs to | `submit` |
 | `AllocateBudget` | Split a total across lines, and make it add up | `submit` |
 
@@ -62,8 +62,8 @@ anywhere in the canvas, and the bridge refuses a chart spec that would draw one.
 And choosing is *one* button. The press that makes a choice is the answer — `ActionCard`,
 `Notice` with actions, a single-select `DataGrid`, a `RatingScale` point, a single-hunk
 `DiffReview` and the last open row of a `PairMatrix` all send themselves on that press. A
-drawn box and a split of a total keep a button, because a rectangle and an arithmetic are the
-two things here that are easier to get wrong than to say. A button asking you to confirm the thing you
+drawing and a split of a total keep a button, because a mark and an arithmetic are the two
+things here that are easier to get wrong than to say. A button asking you to confirm the thing you
 just clicked turns one decision into two, so there is not one.
 
 Plus `note` for narration and `ack` so an agent always knows whether a window is actually
@@ -188,17 +188,46 @@ The full frame reference, every prop shape and the error codes are in
 | `clients/python/` | `auraui` — stdlib-only client, including a from-scratch RFC 6455 codec |
 | `clients/ts/` | `auraui-client` — plain ESM, hand-written types, no build step |
 | `examples/` | The same demo, one question per card, in both languages |
+| `pwa/` | The phone app: its own shell, service worker and manifest, over the same components |
 | `docs/PROTOCOL.md` | The wire contract. Read this before writing an agent. |
-| `docs/REMOTE-AND-MOBILE.md` | Design note: reaching a phone, and what PeerJS would cost |
+| `docs/PWA-REMOTE.md` | Design note: pairing, the peer link, and waking a sleeping phone |
+| `docs/REMOTE-AND-MOBILE.md` | Earlier design note: how the phone options were weighed |
 
 The contract lives in three places that must agree: `docs/PROTOCOL.md`,
 `src/lib/protocol.ts` and `src-tauri/src/protocol.rs`.
+
+## The phone
+
+The canvas is not only an overlay. The same eleven components, the same protocol and the same
+registry also build into an installable phone app, so a question that arrives while the human is
+away from their desk is answered from a pocket instead of waiting.
+
+The desktop draws a QR code; the phone scans it once with the camera; from then on that phone is
+paired. The code carries the desktop's peer id, a shared secret, and the desktop's push key, so
+there is nothing to type and no account anywhere. The question travels over a WebRTC data channel
+directly between the two machines, and the desktop stays the gate: it validates every frame before
+the phone ever sees it, exactly as it does for its own window.
+
+When the phone is asleep, the desktop sends it a push. That is the only part of the path a third
+party is involved in at all — and it is a blind relay, because the desktop signs and encrypts the
+payload itself. The notification wakes the phone's service worker, which shows one notification;
+tapping it opens the app, which dials the desktop back.
+
+The phone build is published from `dist-pwa` to GitHub Pages by
+[.github/workflows/pages.yml](.github/workflows/pages.yml). It has to live on a real HTTPS origin
+— a service worker and the Push API do not exist in a page served over a LAN address — which is
+the whole reason it is not served out of the desktop binary.
+
+[PWA-REMOTE.md](docs/PWA-REMOTE.md) is the design note, including the correction to the
+architecture it started from: a browser cannot send a push, so the sender is the desktop.
 
 ## Tests and checks
 
 ```bash
 npm run typecheck      # TypeScript, strict
 npm run build          # typecheck + production canvas bundle
+npm run build:pwa      # typecheck + the installable phone bundle the Pages workflow publishes
+npm run dev:pwa        # the phone app in a browser, with a scripted agent
 npm run test:rust      # protocol unit tests + real-socket bridge integration tests
 ```
 
@@ -217,7 +246,13 @@ python3 examples/demo_agent.py --once --step-timeout 20
 
 The PRD's Milestone 3 — commanding a webview, recording user workflows as DOM telemetry, and
 tldraw snapshot redlining — is not built. Those need a real Tauri window and native capture,
-and they are the next milestone rather than a stub. Mobile parity (Milestone 4) is untouched.
+and they are the next milestone rather than a stub.
+
+The phone app exists and is paired by hand, but the desktop half of the pairing is not wired up
+yet: it cannot yet draw the QR, does not persist its peer identity or push keys, cannot send a
+push, and does not relay frames over the link. Until it does, a phone only works while the app is
+open. The four pieces are one milestone and are listed in
+[PWA-REMOTE.md](docs/PWA-REMOTE.md) §6.
 
 ## Security
 
@@ -225,6 +260,12 @@ The bridge is **loopback only** and has no authentication: anything that can ope
 `127.0.0.1:9090` on this machine can put a card in front of the human. That is local-machine
 trust, the same as a terminal. The canvas renders declarative props only — agents cannot
 inject HTML, CSS or JavaScript.
+
+A paired phone is a second door, and it is locked differently. It presents a 128-bit token from
+the QR, compared without an early exit; a socket that does not present it within ten seconds is
+closed; and a guest that does present it can only answer questions the desktop already accepted,
+because the validator stays on the desktop side of the link. The pairing payload travels in a URL
+fragment, which browsers never send to a server.
 
 ## License
 

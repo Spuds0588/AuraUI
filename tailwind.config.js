@@ -1,7 +1,9 @@
 /** @type {import('tailwindcss').Config} */
 export default {
   darkMode: ["class"],
-  content: ["./index.html", "./src/**/*.{ts,tsx}"],
+  // Both apps: the desktop overlay (index.html + src/) and the phone PWA (pwa/). One utility
+  // vocabulary for both, so a component moved between them keeps its styling.
+  content: ["./index.html", "./src/**/*.{ts,tsx}", "./pwa/**/*.{ts,tsx,html}"],
   theme: {
     extend: {
       colors: {

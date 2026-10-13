@@ -5,7 +5,7 @@
  * Walks a human through all eleven AuraUI component kinds in turn: an ActionCard triage
  * choice, a short WizardForm/ActionCard incident interview, a DataGrid row pick, a
  * SortableList ordering, an InteractiveChart drill-down, a RatingScale confidence check,
- * a per-hunk DiffReview, a RegionMark box on a picture, a PairMatrix, an AllocateBudget, and
+ * a per-hunk DiffReview, a RegionMark drawing on a picture, a PairMatrix, an AllocateBudget, and
  * a closing Notice. Every answer is printed as it arrives, so
  * the script doubles as a smoke test of the whole loop.
  *
@@ -382,13 +382,15 @@ async function run(agent) {
   console.log();
 
   // 8. RegionMark --------------------------------------------------------
-  // "Draw a box around the thing that is wrong." The agent already has the picture — it took
-  // the screenshot itself — so the bytes travel with the question and the answer comes back as
-  // a fraction of the picture rather than a pixel on somebody's monitor.
-  const marked = await ask(agent, "RegionMark box on the staging dashboard", {
+  // "Show me where it is wrong." The agent already has the picture — it took the screenshot
+  // itself — so the bytes travel with the question, and what comes back is the drawing: boxes,
+  // circles, arrows, Xs and freehand lines, as fractions of the picture rather than pixels on
+  // somebody's monitor.
+  const marked = await ask(agent, "RegionMark drawing on the staging dashboard", {
     component: "RegionMark",
     instruction:
-      "Draw a box around the panel that looks wrong to you and I will read the pixels under it.",
+      "Circle the panel that looks wrong, and point at anything worth reading from it. " +
+      "Draw as much as you need.",
     props: c.regionMark(c.imageData(DASHBOARD_SVG, "image/svg+xml"), {
       width: 960,
       height: 600,
@@ -396,11 +398,13 @@ async function run(agent) {
         "staging checkout dashboard: p95 latency 412ms, charge success 98.4%, error rate 6.1%, " +
         "and a request-rate chart",
       label: "staging / checkout, 960x600",
-      help: "Drag across the panel, or aim with the arrow keys and press Enter twice.",
+      help: "Pick a pen and draw. Backspace takes back the last mark.",
     }),
   });
-  const box = marked.payload?.region ?? {};
-  agent.note(`Marked ${box.w} by ${box.h} at ${box.x}, ${box.y}.`, "meta");
+  const shapes = marked.payload?.shapes ?? [];
+  const shapeNames = { rect: "box", ellipse: "circle", arrow: "arrow", cross: "X", path: "line" };
+  const drawn = shapes.map((shape) => shapeNames[shape.kind] ?? "mark").join(", ") || "nothing";
+  agent.note(`Drawing received: ${shapes.length} mark(s) — ${drawn}.`, "meta");
   console.log();
 
   // 9. PairMatrix --------------------------------------------------------
@@ -464,7 +468,7 @@ async function run(agent) {
         `Drill-down: ${region}`,
         `Confidence: ${confidence}/5 (${confidenceWord})`,
         `Patch: ${accepted.length} hunks accepted, ${rejected.length} rejected`,
-        `Marked area: ${box.w} x ${box.h} at ${box.x}, ${box.y} of the dashboard`,
+        `Marks on the dashboard: ${shapes.length} (${drawn})`,
         `Routed ${Object.keys(pairs).length} failing runs to a team`,
         `Verification budget: ${Object.values(split).reduce((sum, n) => sum + n, 0)}/40 ` +
           `minutes across ${Object.keys(split).length} lines`,

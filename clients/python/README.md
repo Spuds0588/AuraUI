@@ -204,8 +204,8 @@ c.diff_line(kind, text)
 c.diff_review(hunks, title=None, footnote=None)
 
 c.image_data(data, mime="image/png")
-c.region_mark(src, mode=None, width=None, height=None, alt=None, label=None, help=None,
-              submit_label=None)
+c.region_mark(src, tool=None, tools=None, width=None, height=None, alt=None, label=None,
+              help=None, submit_label=None)
 c.pair_option(id, label, description=None)
 c.pair_row(id, label, description=None, options=None)
 c.pair_matrix(rows, options, require_all=None, submit_label=None, help=None)
@@ -273,9 +273,9 @@ print(review["payload"]["accepted"])   # ["h1"]
 print(review["payload"]["decisions"])  # {"h1": "accept"}
 ```
 
-## RegionMark: show me where
+## RegionMark: draw on the picture
 
-You send the picture; the human marks a place on it; you get the place back. This is the
+You send the picture; the human draws on it; you get the drawing back as vectors. This is the
 "draw a box around the element that is rendering wrong" question, without a webview and
 without a screenshot API on our side: take your own screenshot and send the bytes.
 
@@ -284,7 +284,7 @@ from pathlib import Path
 
 answer = agent.task(
     component="RegionMark",
-    instruction="Draw a box around the panel that looks wrong.",
+    instruction="Circle the panel that looks wrong, and point at anything worth reading from it.",
     props=c.region_mark(
         c.image_data(Path("staging.png").read_bytes()),
         width=1280,
@@ -292,15 +292,24 @@ answer = agent.task(
         alt="staging checkout dashboard: p95 412ms, error rate 6.1%",
     ),
 )
-print(answer["payload"]["region"])  # {"x": 0.25, "y": 0.1, "w": 0.5, "h": 0.25}
+for shape in answer["payload"]["shapes"]:
+    print(shape["kind"], shape.get("x"), shape.get("y"))
 ```
 
-The answer is a **fraction of the picture**, never a pixel: you know the size of what you
-sent, the canvas knows how large it drew it on this screen, and a fraction is the one
-coordinate that needs no agreement about size. ``mode="point"`` marks one spot and is answered
-by that press; ``mode="box"`` (the default) is drawn and then sent, because a rectangle is
-easier to get wrong than to say. An SVG works too, via
-``c.image_data(svg, "image/svg+xml")``.
+It is a canvas, not a picker. The human has five pens — ``rect``, ``ellipse``, ``arrow``,
+``cross`` and ``path`` — and draws as many marks as the answer needs, because the useful answer
+is usually several marks and the relationship between them: circle the panel, then an arrow
+from it to the number that went wrong. ``tool`` is the pen the card opens on (``rect`` by
+default); ``tools`` restricts the toolbar, which is how an agent that only wants an arrow —
+*show me which way the flow goes* — declines to ask a question with five answers.
+
+The answer is a list of ``shapes`` in the order they were drawn, each a **fraction of the
+picture**: you know the size of what you sent, the canvas knows how large it drew it on this
+screen, and a fraction is the one coordinate that needs no agreement about size. Nothing is
+flattened into a screenshot, so you read what was drawn, not a picture of it. A drawing keeps a
+button — a shape is chosen by making it, and the release of a drag is when a person is least
+sure of the edge — so marks are undone and redrawn as long as it takes and sent when the
+picture says what they meant. An SVG works too, via ``c.image_data(svg, "image/svg+xml")``.
 
 ``c.image_data`` is not optional glue: ``src`` must be an ``https:`` URL or a ``data:image/``
 URL. The canvas will not fetch a plaintext address or read a local file on the say-so of

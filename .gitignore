@@ -3,6 +3,8 @@
 
 node_modules/
 dist/
+# The phone build. Published to GitHub Pages by the workflow, never committed.
+dist-pwa/
 src-tauri/target/
 *.log
 .DS_Store

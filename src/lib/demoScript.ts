@@ -377,7 +377,7 @@ function wrapUpFrame(): AgentFrame {
         "Every answer you gave came back as a JSON event on the socket, not as a screenshot",
         "The chart data and the diff both came from the agent, so nothing on the canvas was invented",
         "All eleven question kinds ran, and not one of them is a checkbox, a radio button or a dropdown",
-        "You marked an area of a picture and the answer came back as a fraction of it, not a pixel",
+        "You drew on a picture, and it came back as vectors in fractions of it: marks, in order, not a screenshot",
         "Each card asked one question, so nothing was half-answered",
         "The choice, the row, the rating, the hunk and the last matrix row each answered themselves on the press",
         "Run the same session against the desktop app and the answers arrive identically",
@@ -406,17 +406,16 @@ function closingRun(): AgentFrame {
         id: "markup",
         component: "RegionMark",
         instruction:
-          "I could not capture the staging dashboard myself. Draw a box around the panel that " +
-          "looks wrong to you and I will read the pixels under it.",
+          "I could not capture the staging dashboard myself. Draw on it: circle what looks " +
+          "wrong, and point at anything I should read from it.",
         props: {
           src: DASHBOARD_IMAGE,
           width: 960,
           height: 600,
           alt: "Staging checkout dashboard: p95 latency 412ms, charge success 98.4%, error rate 6.1%, and a request-rate chart",
-          mode: "box",
           label: "staging / checkout, 960x600",
-          submitLabel: "Send this area",
-          help: "Drag across the panel, or aim with the arrow keys and press Enter twice. Nothing is sent until it looks right.",
+          submitLabel: "Send this drawing",
+          help: "Pick a pen: a circle round the panel that is wrong, then an arrow to the number that explains it. Backspace takes back the last mark.",
         },
       },
       {
@@ -901,19 +900,24 @@ export function demoReply(
     // them, which is the mark-up card at the end of the run.
     case "markup": {
       if (event !== "submit") return [];
-      const region = (p.region ?? {}) as Record<string, unknown>;
-      const point = (p.point ?? {}) as Record<string, unknown>;
-      const percent = (value: unknown) =>
-        typeof value === "number" ? `${(value * 100).toFixed(1)}%` : "?";
+      const shapes = Array.isArray(p.shapes) ? (p.shapes as Record<string, unknown>[]) : [];
+      const names: Record<string, string> = {
+        rect: "box",
+        ellipse: "circle",
+        arrow: "arrow",
+        cross: "X",
+        path: "line",
+      };
+      const drawn = shapes.map((shape) => names[String(shape.kind)] ?? "mark");
       const read =
-        Object.keys(region).length > 0
-          ? `a ${percent(region.w)} by ${percent(region.h)} box at ${percent(region.x)}, ${percent(region.y)}`
-          : `the spot at ${percent(point.x)}, ${percent(point.y)}`;
+        drawn.length === 0
+          ? "an empty canvas"
+          : `${drawn.length} mark${drawn.length === 1 ? "" : "s"} (${drawn.join(", ")})`;
       return [
         {
           delay: 140,
           frame: frame("note", {
-            text: `Reading ${read} of the dashboard. That is the latency panel and the error-rate panel both, so I will pull both.`,
+            text: `Reading ${read} over the dashboard, so I will pull what each one points at. Numbered in the order you drew them, the same way the card numbers them.`,
             kind: "progress",
           }),
         },

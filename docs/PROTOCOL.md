@@ -673,56 +673,78 @@ Send **one hunk per card**. Because the review cannot be sent until every hunk i
 a decision, a card with two hunks is two questions wearing one card, and the human pays for
 that with a second press.
 
-### RegionMark — show me where
+### RegionMark — the human draws on a picture
 
 ```json
 { "src": "data:image/png;base64,iVBORw0KGgo…",
   "width": 1280, "height": 800,
-  "mode": "box",
+  "tool": "ellipse",
+  "tools": ["ellipse", "arrow", "cross"],
   "alt": "staging checkout dashboard: p95 412ms, error rate 6.1%",
   "label": "staging / checkout, 1280x800",
-  "submitLabel": "Send this area" }
+  "submitLabel": "Send this drawing" }
 ```
 
 "Draw a box around the element that is rendering wrong" — the Oracle case — with a picture
-instead of a webview. You send the image; the human marks a place on it; you get the place back.
+instead of a webview. You send the image; the human draws on it; you get the drawing back.
 
-`mode` ∈ `box | point`, default `box`.
+It is a **canvas, not a picker**. One box is a poor vocabulary for "here is what is wrong": the
+useful answer is usually a few marks and the relationship between them — circle the panel, then
+an arrow from it to the number that explains it — so the card offers five pens and takes as many
+marks as the answer needs.
 
-**The answer is a fraction of the image, never a pixel.** You know the size of what you sent;
-the canvas knows only how large it managed to draw it on whatever screen the card landed on. A
-fraction is the one coordinate both sides agree on without either being told the other's size,
-and it survives the window being resized between the question and the answer. `x`, `y`, `w` and
-`h` are all `0` to `1`, with the origin at the top-left.
+| Pen | Needs | Drawn as |
+| --- | --- | --- |
+| `rect` | a drag | `{ "kind": "rect", "x": …, "y": …, "w": …, "h": … }` |
+| `ellipse` | a drag | `{ "kind": "ellipse", "x": …, "y": …, "w": …, "h": … }` |
+| `arrow` | a drag | `{ "kind": "arrow", "from": {…}, "to": {…} }` |
+| `cross` | one press | `{ "kind": "cross", "at": {…} }` |
+| `path` | a drag | `{ "kind": "path", "points": [{…}, …] }` |
 
-`point` mode emits terminal `submit` on the press that marks it:
+A box and a circle are given as the box they fit inside. An arrow keeps both ends as they were
+drawn, because which end is the head is half of what it says. Freehand keeps the line itself.
+
+**The answer is fractions of the image, never pixels, and in the order the marks were drawn.**
+You know the size of what you sent; the canvas knows only how large it managed to draw it on
+whatever screen the card landed on. A fraction is the one coordinate both sides agree on without
+either being told the other's size, and it survives the window being resized between the question
+and the answer. `x`, `y`, `w`, `h`, `from`, `to`, `at` and every point in `points` are all `0` to
+`1`, with the origin at the top-left. Order is what lets you say "the arrow from the first box",
+and the card numbers each mark on the picture so the human can see the same numbering you read.
+
+The drawing is sent by a button, not by the last stroke: a mark is chosen by making it, and the
+moment a drag ends is the moment a person is least sure they got the edge right. Anything can be
+taken back before that.
 
 ```json
-{ "component": "RegionMark", "mode": "point", "point": { "x": 0.4125, "y": 0.2 } }
+{ "component": "RegionMark",
+  "shapes": [
+    { "kind": "ellipse", "x": 0.25, "y": 0.1, "w": 0.5, "h": 0.25 },
+    { "kind": "arrow", "from": { "x": 0.75, "y": 0.35 }, "to": { "x": 0.86, "y": 0.66 } },
+    { "kind": "cross", "at": { "x": 0.86, "y": 0.66 } }
+  ] }
 ```
 
-`box` mode does not, and that is deliberate: releasing a drag is the moment a human is *least*
-sure they got the edge right, and a rectangle is the one thing here that is easier to get wrong
-than to say. A drawn box can be redrawn as often as it takes and is sent by a button:
-
-```json
-{ "component": "RegionMark", "mode": "box",
-  "region": { "x": 0.25, "y": 0.1, "w": 0.5, "h": 0.25 } }
-```
-
-The whole card works from the keyboard. A crosshair starts in the middle of the picture, the
-arrow keys move it (hold Shift for a bigger step), Enter drops the first corner and again the
-second, and in `point` mode Enter marks the spot and answers.
+The whole card works from the keyboard, because the pictures worth marking are usually on the
+screen the mouse is already pointing at something on. Digits pick the pen — each one is printed
+on its button — the arrow keys aim a crosshair (hold Shift for a bigger step), Enter drops the
+first point and again the second, and Backspace takes back the last mark.
 
 | Field | Required | Meaning |
 | --- | --- | --- |
 | `src` | yes | An `https:` URL, or a `data:image/…` URL. **Nothing else.** |
-| `mode` | no | `"box"` (default) or `"point"`. |
+| `tool` | no | The pen the card opens on: `rect` (default), `ellipse`, `arrow`, `cross` or `path`. |
+| `tools` | no | Which pens to offer, in order. Omitted means all five. |
 | `width`, `height` | no | The image's natural size in pixels, so the frame has the right shape before it loads. |
 | `alt` | no | Alt text. Send it: it is the only description a screen reader gets. |
 | `label` | no | A caption above the picture. |
-| `submitLabel` | no | The label on the button that sends a drawn box. Unused in `point` mode. |
+| `submitLabel` | no | The label on the button that sends the drawing. |
 | `help` | no | Your own words under the picture, replacing the canvas's. |
+
+`tools` is the question as much as the instruction is: an agent that wants to know *which way
+the flow goes* sends `"tools": ["arrow"]` rather than asking a question with five answers. An
+empty list, or a pen that does not exist, is refused at the bridge — a toolbar that cannot mark
+the thing that was asked is worse than no toolbar at all.
 
 **`src` is restricted to `https:` and `data:image/`.** AuraUI draws over whatever the human was
 already doing, so it will not fetch a plaintext address or read a local file on the say-so of

@@ -45,6 +45,15 @@ should wait until an agent actually needs it.
 
 ## 2. Reaching a phone, over a network the bridge does not own
 
+> **Superseded.** Option C below was chosen and is now built, and option A was not. The
+> objection to PeerJS in this section — that an open peer id is an open door — is answered by
+> pairing: the desktop shows a QR carrying a peer id and a 128-bit token, and a socket that does
+> not present the token in ten seconds is closed. The objection that the canvas would become the
+> peer does not apply either, because the **desktop** is the peer and stays the gate. The current
+> design, the hosting decision and the evidence are in [PWA-REMOTE.md](PWA-REMOTE.md). What was
+> wrong was not the ranking; it was the assumption that the notification path needs no server,
+> which is corrected in §3.
+
 The goal: the agent runs on a laptop or a server, the human is on their phone, and a question
 arrives as a notification they can answer.
 
@@ -96,9 +105,12 @@ natively — a PWA could talk to the desktop agent directly. The costs are real:
   talking to an agent directly must run the same rules, or the browser becomes the weakest link
   in the "no agent-authored HTML" guarantee.
 
-Verdict: PeerJS is the most moving parts on the most sensitive path. It is worth revisiting only
-if a VPN is genuinely unacceptable for the people using this — and then option B is still
-simpler.
+Verdict: PeerJS is the most moving parts on the most sensitive path. It was chosen anyway, over
+the VPN, because the VPN solves the wrong problem: it connects two of *your* machines, and what
+was wanted is for the agent to reach a phone that is not on your network at all. What the
+ranking above did not account for is that pairing turns the open peer id into a closed one, and
+that the desktop — a native process — can be the push sender, which removes the broker from the
+notification path entirely.
 
 ---
 
@@ -106,12 +118,19 @@ simpler.
 
 Worth being blunt about, because the two goals in the request have different answers.
 
-**Notifications.** A PWA can show them, with caveats. The human must grant permission from a
-user gesture, and the page has to be reachable to receive a push — which means Web Push, which
-means a push service, which is a server that knows when your agent is asking you something. That
-is in direct tension with "local-first". The alternative, keeping a WebSocket alive in the
-background, is throttled hard by both Android and iOS, so it cannot be relied on to wake a
-closed app.
+**Notifications.** Built, with the caveats below. The human must grant permission from a user
+gesture, and the page has to be reachable to receive a push — which means Web Push, which means
+a push service.
+
+Correction to what this section used to say: the push service is *not* a server that knows when
+your agent is asking you something. It is a gateway that sees an encrypted payload and a
+subscription endpoint, and it never sees the subscription's key — because the sender is the
+desktop itself, signing with a VAPID key pair that lives in the desktop's own data directory.
+The tension with "local-first" is real but much smaller than it looked: the gateway is a
+blind relay, not a broker of the conversation. It also has to be said that the alternative —
+keeping a WebSocket alive in the background — is throttled hard by both Android and iOS, so it
+cannot be relied on to wake a closed app. See [PWA-REMOTE.md](PWA-REMOTE.md) §1 for why the
+sender cannot be a browser, and §5 for the wake-up loop.
 
 **Drawing over other apps.** On Android this is possible and only on Android: an app with the
 `SYSTEM_ALERT_WINDOW` permission can draw a real overlay above other applications, which is

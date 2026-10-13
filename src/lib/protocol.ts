@@ -399,12 +399,12 @@ export interface EventPayload {
     accepted?: string[];
     /** DiffReview: the hunk ids the human rejected, in the order they were sent. */
     rejected?: string[];
-    /** RegionMark: the area the human drew, as fractions of the image they drew on. */
-    region?: RegionBox;
-    /** RegionMark: the single spot they marked, as fractions. Present in `point` mode. */
-    point?: RegionPoint;
-    /** RegionMark: which of the two the payload is carrying, echoing what was asked for. */
-    mode?: "box" | "point";
+    /**
+     * RegionMark: everything the human drew, in the order they drew it, as fractions of the
+     * picture they drew on. Empty is possible only if they were allowed to send a blank canvas;
+     * by default the card will not send one.
+     */
+    shapes?: MarkShape[];
     /** PairMatrix: one option id per row id. Every row is present unless `requireAll` is false. */
     pairs?: Record<string, string>;
     /** PairMatrix: the rows deliberately left unplaced, in the order they were sent. */
@@ -681,49 +681,83 @@ export interface DiffReviewProps {
   footnote?: string;
 }
 
-/**
- * Where a mark landed on an image, as fractions of the picture.
- *
- * Normalised rather than in pixels on purpose: the agent knows the image it sent, the canvas
- * knows only how large it managed to draw it, and a fraction means the two agree without
- * either having to be told the other's size. Origin is the top-left, x grows right, y grows
- * down, every value is between 0 and 1.
- */
-export interface RegionBox {
+/** Where a point on a picture is, as a fraction of it. Origin is top-left, both values 0 to 1. */
+export interface MarkPoint {
+  x: number;
+  y: number;
+}
+
+/** A rectangle or an ellipse, given as the box it fits inside, in fractions of the picture. */
+export interface MarkBoxShape {
+  kind: "rect" | "ellipse";
   x: number;
   y: number;
   w: number;
   h: number;
 }
 
-export interface RegionPoint {
-  x: number;
-  y: number;
+/** A line with a head on it: "this leads to that". */
+export interface MarkArrowShape {
+  kind: "arrow";
+  from: MarkPoint;
+  to: MarkPoint;
+}
+
+/** A single X. The cheapest way to say "here", and the only one that needs no second point. */
+export interface MarkCrossShape {
+  kind: "cross";
+  at: MarkPoint;
+}
+
+/** Freehand. The points are the line itself, in the order they were drawn. */
+export interface MarkPathShape {
+  kind: "path";
+  points: MarkPoint[];
 }
 
 /**
- * "Show me where."
+ * One thing the human drew on the picture.
+ *
+ * Every coordinate is a fraction of the picture rather than a pixel, for the same reason the
+ * old box answer was: the agent knows the size of the image it sent, the canvas knows only how
+ * large it drew it on this screen, and a fraction is the one coordinate both agree on without
+ * being told the other's size. The shapes arrive in the order they were drawn, so "the arrow
+ * from the first box" means something to both sides.
+ */
+export type MarkShape = MarkBoxShape | MarkArrowShape | MarkCrossShape | MarkPathShape;
+
+/** What the human can draw with. Mirrors `MARK_TOOLS` in the Rust bridge. */
+export const MARK_TOOLS = ["rect", "ellipse", "arrow", "cross", "path"] as const;
+
+export type MarkTool = (typeof MARK_TOOLS)[number];
+
+/**
+ * "Show me where", as a drawing surface rather than a selection.
  *
  * The PRD's Oracle case — *draw a box around the element that is rendering wrong* — asked for a
- * webview, a native screenshot and tldraw. It only actually needs a picture and a place on it,
- * so this component takes the picture the agent already has in hand and returns the place. An
- * agent that wants the human to point at something takes its own screenshot, sends the bytes as
- * a `data:` URL, and gets back a fraction of the frame it sent.
+ * webview, a native screenshot and tldraw. It only actually needs a picture and a way to point
+ * at part of it, so this takes the picture the agent already has in hand and gives back what
+ * was drawn on it. The agent takes its own screenshot, sends the bytes as a `data:` URL, and
+ * gets back shapes in fractions of the frame it sent.
  *
- * `src` is deliberately restricted to `https:` and `data:image/` by the bridge. An overlay that
- * appears over someone's desktop unasked is not the place to let a socket on the machine name
- * any URL it likes, and a local file path has no business being fetched either. An agent with
- * bytes in hand base64s them, which is the common case anyway.
+ * **It is a canvas, not a picker.** The first version of this asked for one box, and one box is
+ * a poor vocabulary for "here is what is wrong": the thing worth saying is usually a couple of
+ * areas *and* the relationship between them — circle the panel, then an arrow from it to the
+ * number that went wrong. So the human gets a small set of pens (box, circle, arrow, X, freehand)
+ * and draws as many marks as the answer really needs, undoing whatever did not come out right.
+ * Every mark is kept, numbered, and sent as a vector: nothing is flattened into a picture, so
+ * the agent can read exactly what was drawn rather than a screenshot of a drawing.
  *
- * A `point` is answered by the press that makes it, like a rating point or a row. A `box` is
- * not: a drag is a shape the human is still choosing, and the moment the pointer is released
- * is the moment they are least sure of it. So a box is drawn and then sent, and everything in
- * between is undoable — which is also the honest reading of "mark the area", as opposed to
- * "pick the one of these four that is broken".
+ * Two rules survive from the first version. `src` is restricted to `https:` and `data:image/` by
+ * the bridge, because an overlay that appears over someone's desktop unasked is not the place to
+ * let a socket name any address it likes, and a local file path has no business being fetched
+ * either. And a drawing keeps a button: a shape is chosen by making it, and releasing a drag is
+ * the moment a human is least sure they got the edge right, so marks are made, checked, undone
+ * and redrawn as long as it takes, and sent when the picture says what they meant.
  */
 export interface RegionMarkProps {
   /**
-   * The picture to mark. An `https:` URL, or a `data:image/...` URL when the agent has the
+   * The picture to draw on. An `https:` URL, or a `data:image/...` URL when the agent has the
    * bytes. No other scheme is accepted: the bridge refuses one before it reaches a window.
    */
   src: string;
@@ -732,15 +766,20 @@ export interface RegionMarkProps {
   height?: number;
   /** Alt text for the picture. Worth sending: it is the only description a screen reader has. */
   alt?: string;
-  /** Mark one spot (`point`) or an area (`box`). Defaults to `box`, the Oracle case. */
-  mode?: "box" | "point";
+  /** The pen the card starts on. Defaults to `rect`, the commonest thing to say. */
+  tool?: MarkTool;
+  /**
+   * Which pens to offer, in the order they should appear. Omitted means all five.
+   *
+   * A subset is how an agent that only wants an arrow — *show me which way the flow goes* —
+   * declines to ask a question with five answers. Naming a pen that does not exist is refused
+   * at the bridge, because it would draw a toolbar that cannot mark the thing that was asked.
+   */
+  tools?: MarkTool[];
   /** A caption above the picture, e.g. "staging dashboard, 1280x800". */
   label?: string;
   help?: string;
-  /**
-   * The label on the button that sends a drawn box. Unused in `point` mode, where the press is
-   * the answer and there is no button to put a label on.
-   */
+  /** The label on the button that sends the drawing. */
   submitLabel?: string;
 }
 
@@ -995,6 +1034,29 @@ export function parseAgentFrame(raw: unknown): AgentFrame {
   }
 }
 
+/**
+ * Count the shapes the human drew, and name them, for the receipt on a resolved card.
+ *
+ * The count is what matters — "3 marks" tells someone at a glance that their drawing arrived —
+ * and the names are there because "a box, an arrow and an X" is a sentence a person can check
+ * against what they meant to say.
+ */
+export function describeShapes(shapes: readonly unknown[]): string {
+  const names: Record<string, string> = {
+    rect: "a box",
+    ellipse: "a circle",
+    arrow: "an arrow",
+    cross: "an X",
+    path: "a line",
+  };
+  const drawn = shapes
+    .map((shape) => (shape && typeof shape === "object" ? names[(shape as { kind?: string }).kind ?? ""] : undefined))
+    .filter((name): name is string => name !== undefined);
+  if (drawn.length === 0) return "Nothing drawn";
+  const listed = drawn.length > 3 ? `${drawn.slice(0, 3).join(", ")}…` : drawn.join(", ");
+  return `Sent ${drawn.length} mark${drawn.length === 1 ? "" : "s"}: ${listed}`;
+}
+
 export class ProtocolError extends Error {
   constructor(
     readonly code: ErrorCode,
@@ -1039,8 +1101,7 @@ export function summarizeAnswer(event: EventName, payload: unknown): string {
         const rejected = Array.isArray(p.rejected) ? p.rejected.length : 0;
         return `Review sent: ${accepted} accepted, ${rejected} rejected`;
       }
-      if (p.region && typeof p.region === "object") return "Marked an area";
-      if (p.point && typeof p.point === "object") return "Marked a spot";
+      if (Array.isArray(p.shapes)) return describeShapes(p.shapes as unknown[]);
       if (p.pairs && typeof p.pairs === "object") {
         const n = Object.keys(p.pairs as object).length;
         const left = Array.isArray(p.unassigned) ? p.unassigned.length : 0;

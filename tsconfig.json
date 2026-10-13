@@ -18,6 +18,6 @@
     "baseUrl": ".",
     "paths": { "@/*": ["./src/*"] }
   },
-  "include": ["src", "clients/ts"],
+  "include": ["src", "clients/ts", "pwa"],
   "references": [{ "path": "./tsconfig.node.json" }]
 }

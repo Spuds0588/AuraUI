@@ -869,7 +869,8 @@ async fn the_three_newer_kinds_reach_a_human_and_come_back() {
         "neither refusal may reach the human's surface"
     );
 
-    // A mark-up, answered with a box in fractions of the picture.
+    // A mark-up, answered with two marks in fractions of the picture, in the order they were
+    // drawn: a box and an X inside it, which is the shape an annotation actually has.
     let picture = "data:image/png;base64,iVBORw0KGgo=";
     send_json(
         &mut ws,
@@ -877,8 +878,14 @@ async fn the_three_newer_kinds_reach_a_human_and_come_back() {
             "type": "task",
             "taskId": "t_mark",
             "component": "RegionMark",
-            "instruction": "Draw a box around the panel that looks wrong.",
-            "props": {"src": picture, "width": 960, "height": 600, "mode": "box"}
+            "instruction": "Draw on the dashboard: circle what looks wrong.",
+            "props": {
+                "src": picture,
+                "width": 960,
+                "height": 600,
+                "tool": "ellipse",
+                "tools": ["ellipse", "arrow", "cross"]
+            }
         }),
     )
     .await;
@@ -901,11 +908,19 @@ async fn the_three_newer_kinds_reach_a_human_and_come_back() {
     let answered = handle.emit_event(
         "t_mark",
         EventName::Submit,
-        json!({"component":"RegionMark","mode":"box","region":{"x":0.25,"y":0.1,"w":0.5,"h":0.25}}),
+        json!({
+            "component": "RegionMark",
+            "shapes": [
+                {"kind":"ellipse","x":0.25,"y":0.1,"w":0.5,"h":0.25},
+                {"kind":"cross","at":{"x":0.5,"y":0.22}}
+            ]
+        }),
     );
     let event = recv_json(&mut ws).await;
     assert_eq!(event["event"].as_str(), Some("submit"));
-    assert_eq!(event["payload"]["region"]["w"].as_f64(), Some(0.5));
+    assert_eq!(event["payload"]["shapes"][0]["kind"].as_str(), Some("ellipse"));
+    assert_eq!(event["payload"]["shapes"][0]["w"].as_f64(), Some(0.5));
+    assert_eq!(event["payload"]["shapes"][1]["kind"].as_str(), Some("cross"));
     assert_eq!(event["seq"].as_u64(), Some(answered.seq));
 
     // The matching grid. Its partial answers arrive as signals before the last row lands, which is

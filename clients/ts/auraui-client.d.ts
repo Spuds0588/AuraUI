@@ -290,36 +290,67 @@ export interface DiffReviewProps {
   footnote?: string;
 }
 
-/**
- * Where a mark landed on a picture, as fractions of it.
- *
- * Normalised rather than in pixels: you know the size of the image you sent, the canvas knows
- * only how large it managed to draw it on this screen, and a fraction is the one coordinate both
- * sides agree on without being told the other's size. Origin is top-left, every value is 0 to 1.
- */
-export interface RegionBox {
+/** Where a point on a picture is, as a fraction of it. Origin is top-left, both values 0 to 1. */
+export interface MarkPoint {
+  x: number;
+  y: number;
+}
+
+/** A rectangle or an ellipse, as the box it fits inside, in fractions of the picture. */
+export interface MarkBoxShape {
+  kind: "rect" | "ellipse";
   x: number;
   y: number;
   w: number;
   h: number;
 }
 
-export interface RegionPoint {
-  x: number;
-  y: number;
+/** A line with a head on it: "this leads to that". */
+export interface MarkArrowShape {
+  kind: "arrow";
+  from: MarkPoint;
+  to: MarkPoint;
+}
+
+/** A single X. The cheapest way to say "here", and the only mark that needs no second point. */
+export interface MarkCrossShape {
+  kind: "cross";
+  at: MarkPoint;
+}
+
+/** Freehand: the line itself, in the order the points were drawn. */
+export interface MarkPathShape {
+  kind: "path";
+  points: MarkPoint[];
 }
 
 /**
- * "Show me where."
+ * One thing the human drew, in fractions of the picture and in the order it was drawn.
  *
- * You send the picture (an `https:` URL, or the bytes as a `data:` URL from `imageData()`) and
- * get back a place on it. `mode: "box"` draws an area and sends it on a button press; `mode:
- * "point"` is answered by the press that makes it.
+ * Fractions rather than pixels because you know the size of the image you sent and the canvas
+ * only knows how large it drew it on this screen. Order matters: "the arrow from the first box"
+ * means the same thing on both sides because the list is in the order the marks were made.
+ */
+export type MarkShape = MarkBoxShape | MarkArrowShape | MarkCrossShape | MarkPathShape;
+
+/** The five pens a RegionMark card can offer, in the order they are drawn. */
+export type MarkTool = "rect" | "ellipse" | "arrow" | "cross" | "path";
+
+/**
+ * "Show me where", as a drawing surface.
+ *
+ * You send the picture (an `https:` URL, or the bytes as a `data:` URL from `imageData()`) and get
+ * back everything the human drew on it: boxes, circles, arrows, Xs and freehand lines, as many as
+ * the answer needed, in the order they were made. The drawing is sent by a button, because a mark
+ * is chosen by making it and the release of a drag is when a person is least sure of the edge.
  */
 export interface RegionMarkProps {
   /** An `https:` URL, or a `data:image/...` URL from `imageData()`. Nothing else is accepted. */
   src: string;
-  mode?: "box" | "point";
+  /** The pen the card opens on. Defaults to `rect`. */
+  tool?: MarkTool;
+  /** Which pens to offer, in order. Omitted means all five. A pen that does not exist is refused. */
+  tools?: MarkTool[];
   /** The image's natural size, so the frame has the right shape before it loads. */
   width?: number;
   height?: number;
@@ -327,7 +358,7 @@ export interface RegionMarkProps {
   alt?: string;
   label?: string;
   help?: string;
-  /** The button that sends a drawn box. Unused in `point` mode, which has no button. */
+  /** The button that sends the drawing. */
   submitLabel?: string;
 }
 
@@ -732,14 +763,16 @@ export declare function diffReview(
 export declare function imageData(data: string | Uint8Array, mime?: string): string;
 
 /**
- * "Show me where" on a picture you send. Rejects anything but an `https:` URL or a
- * `data:image/...` URL from `imageData()`: the canvas will not fetch a plaintext address or read
- * a local file on the say-so of whatever opened a socket.
+ * A picture for the human to draw on. Rejects anything but an `https:` URL or a `data:image/...`
+ * URL from `imageData()`: the canvas will not fetch a plaintext address or read a local file on
+ * the say-so of whatever opened a socket. An empty or unknown `tools` list is rejected too, since
+ * the toolbar is the question.
  */
 export declare function regionMark(
   src: string,
   extra?: {
-    mode?: "box" | "point";
+    tool?: MarkTool;
+    tools?: MarkTool[];
     width?: number;
     height?: number;
     alt?: string;

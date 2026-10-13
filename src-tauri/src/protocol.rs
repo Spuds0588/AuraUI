@@ -858,6 +858,13 @@ fn validate_diff_review(props: &Value) -> Result<(), String> {
 /// `https:` is allowed for a picture that already lives somewhere public.
 pub const MARK_SRC_PREFIXES: [&str; 2] = ["https://", "data:image/"];
 
+/// The pens a `RegionMark` card can offer. Mirrors `MARK_TOOLS` in protocol.ts.
+///
+/// Order matters: it is the order the buttons appear in and the order the digit keys pick them,
+/// so the two sides have to agree on it. Box first, because "mark the part that is wrong" is
+/// the commonest thing anyone wants to say about a picture.
+pub const MARK_TOOLS: [&str; 5] = ["rect", "ellipse", "arrow", "cross", "path"];
+
 /// Check a `RegionMark`'s picture and the way it is to be marked.
 ///
 /// The one thing this component cannot do without is somewhere to draw: an unusable `src`
@@ -876,18 +883,52 @@ fn validate_region_mark(props: &Value) -> Result<(), String> {
         }
     }
 
-    if let Some(mode) = obj.get("mode") {
-        if !mode.is_null() {
-            match mode.as_str() {
-                Some("box") | Some("point") => {}
+    if let Some(tool) = obj.get("tool") {
+        if !tool.is_null() {
+            match tool.as_str() {
+                Some(name) if MARK_TOOLS.contains(&name) => {}
                 other => {
                     let shown = match other {
                         Some(value) => format!("`{value}`"),
                         None => "not a string".to_string(),
                     };
                     return Err(format!(
-                        "`props.mode` for RegionMark is {shown}, which the canvas cannot draw; expected `box` (draw an area) or `point` (mark one spot)."
+                        "`props.tool` for RegionMark is {shown}, which the canvas cannot draw; expected one of {}.",
+                        mark_tool_list()
                     ));
+                }
+            }
+        }
+    }
+
+    // A toolbar is the question: a pen that does not exist is a button that cannot mark what was
+    // asked for, and an empty list is a drawing surface with nothing to draw with.
+    if let Some(tools) = obj.get("tools") {
+        if !tools.is_null() {
+            let Some(listed) = tools.as_array() else {
+                return Err("`props.tools` for RegionMark must be an array of pen names.".into());
+            };
+            if listed.is_empty() {
+                return Err(format!(
+                    "`props.tools` is empty for RegionMark, so the human would have nothing to draw with; leave the key out to offer all of {}.",
+                    mark_tool_list()
+                ));
+            }
+            for (index, name) in listed.iter().enumerate() {
+                match name.as_str() {
+                    Some(name) if MARK_TOOLS.contains(&name) => {}
+                    Some(unknown) => {
+                        return Err(format!(
+                            "`props.tools[{index}]` is `{unknown}`, which the canvas cannot draw; expected one of {}.",
+                            mark_tool_list()
+                        ))
+                    }
+                    None => {
+                        return Err(format!(
+                            "`props.tools[{index}]` must be a pen name; expected one of {}.",
+                            mark_tool_list()
+                        ))
+                    }
                 }
             }
         }
@@ -1229,6 +1270,15 @@ fn validate_wizard_fields(steps: &Value) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+/// The valid pens, quoted for an error message.
+fn mark_tool_list() -> String {
+    MARK_TOOLS
+        .iter()
+        .map(|tool| format!("`{tool}`"))
+        .collect::<Vec<String>>()
+        .join(", ")
 }
 
 /// The valid field kinds, quoted for an error message.
@@ -1641,14 +1691,20 @@ mod tests {
         let mark = |props: Value| validate_props("RegionMark", &props);
 
         assert!(mark(json!({"src": "https://example.com/shot.png"})).is_ok());
-        assert!(mark(json!({"src": "data:image/png;base64,AAAA", "mode": "point"})).is_ok());
+        assert!(mark(json!({"src": "data:image/png;base64,AAAA", "tool": "cross"})).is_ok());
         assert!(mark(json!({
             "src": "data:image/png;base64,AAAA",
-            "mode": null,
+            "tool": "arrow",
+            "tools": ["arrow", "cross"],
             "width": 1280,
             "height": 800
         }))
         .is_ok());
+        // Every pen by name, and the whole set by omission.
+        for tool in MARK_TOOLS {
+            assert!(mark(json!({"src": "https://x/y.png", "tool": tool})).is_ok());
+            assert!(mark(json!({"src": "https://x/y.png", "tools": [tool]})).is_ok());
+        }
 
         // The picture an agent actually has is a screenshot, which is a data URL. What this
         // refuses is a socket on the machine naming an address of its own choosing.
@@ -1659,7 +1715,15 @@ mod tests {
         assert!(mark(json!({})).is_err());
         assert!(mark(json!({"src": 7})).is_err());
 
-        assert!(mark(json!({"src": "https://x/y.png", "mode": "circle"})).is_err());
+        // The toolbar is the question, so a pen that does not exist and a toolbar with nothing in
+        // it are both refused rather than drawn.
+        let refusal = mark(json!({"src": "https://x/y.png", "tool": "lasso"})).unwrap_err();
+        assert!(refusal.contains("lasso"), "should name it: {refusal}");
+        assert!(refusal.contains("ellipse"), "should list what is drawable: {refusal}");
+        assert!(mark(json!({"src": "https://x/y.png", "tools": []})).is_err());
+        assert!(mark(json!({"src": "https://x/y.png", "tools": ["ghost"]})).is_err());
+        assert!(mark(json!({"src": "https://x/y.png", "tools": "rect"})).is_err());
+        assert!(mark(json!({"src": "https://x/y.png", "tools": [7]})).is_err());
         assert!(mark(json!({"src": "https://x/y.png", "width": 0})).is_err());
         assert!(mark(json!({"src": "https://x/y.png", "height": -3})).is_err());
         assert!(mark(json!({"src": "https://x/y.png", "width": "1280"})).is_err());

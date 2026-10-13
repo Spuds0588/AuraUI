@@ -4,7 +4,7 @@
 Walks a human through all eleven AuraUI component kinds in turn: an ActionCard triage
 choice, a short WizardForm/ActionCard incident interview, a DataGrid row pick, a
 SortableList ordering, an InteractiveChart drill-down, a RatingScale confidence check,
-a per-hunk DiffReview, a RegionMark box on a picture, a PairMatrix, an AllocateBudget, and
+a per-hunk DiffReview, a RegionMark drawing on a picture, a PairMatrix, an AllocateBudget, and
 a closing Notice. Every answer is printed as it arrives, so the script doubles as a smoke
 test of the whole loop.
 
@@ -431,15 +431,16 @@ def run(agent: Agent) -> None:
     print()
 
     # 8. RegionMark --------------------------------------------------------
-    # "Draw a box around the thing that is wrong." The agent already has the picture — it took
-    # the screenshot itself — so the bytes travel with the question and the answer comes back as
-    # a fraction of the picture rather than a pixel on somebody's monitor.
+    # "Show me where it is wrong." The agent already has the picture — it took the screenshot
+    # itself — so the bytes travel with the question, and what comes back is the drawing: boxes,
+    # circles, arrows, Xs and freehand lines, as fractions of the picture rather than pixels on
+    # somebody's monitor.
     marked = ask(
         agent,
-        "RegionMark box on the staging dashboard",
+        "RegionMark drawing on the staging dashboard",
         component="RegionMark",
-        instruction="Draw a box around the panel that looks wrong to you and I will read the "
-                    "pixels under it.",
+        instruction="Circle the panel that looks wrong, and point at anything worth reading from "
+                    "it. Draw as much as you need.",
         props=c.region_mark(
             c.image_data(DASHBOARD_SVG, "image/svg+xml"),
             width=960,
@@ -447,14 +448,16 @@ def run(agent: Agent) -> None:
             alt="staging checkout dashboard: p95 latency 412ms, charge success 98.4%, "
                 "error rate 6.1%, and a request-rate chart",
             label="staging / checkout, 960x600",
-            help="Drag across the panel, or aim with the arrow keys and press Enter twice.",
+            help="Pick a pen and draw. Backspace takes back the last mark.",
         ),
     )
-    box = (marked.get("payload") or {}).get("region") or {}
-    agent.note(
-        f"Marked {box.get('w')} by {box.get('h')} at {box.get('x')}, {box.get('y')}.",
-        kind="meta",
-    )
+    shapes = (marked.get("payload") or {}).get("shapes") or []
+    drawn = ", ".join(
+        {"rect": "box", "ellipse": "circle", "arrow": "arrow", "cross": "X",
+         "path": "line"}.get(shape.get("kind"), "mark")
+        for shape in shapes
+    ) or "nothing"
+    agent.note(f"Drawing received: {len(shapes)} mark(s) — {drawn}.", kind="meta")
     print()
 
     # 9. PairMatrix --------------------------------------------------------
@@ -526,8 +529,7 @@ def run(agent: Agent) -> None:
                 f"Drill-down: {region}",
                 f"Confidence: {confidence}/5 ({confidence_word})",
                 f"Patch: {len(accepted)} hunks accepted, {len(rejected)} rejected",
-                f"Marked area: {box.get('w')} x {box.get('h')} at "
-                f"{box.get('x')}, {box.get('y')} of the dashboard",
+                f"Marks on the dashboard: {len(shapes)} ({drawn})",
                 f"Routed {len(pairs)} failing runs to a team",
                 f"Verification budget: {sum(split.values())}/40 minutes across "
                 f"{len(split)} lines",

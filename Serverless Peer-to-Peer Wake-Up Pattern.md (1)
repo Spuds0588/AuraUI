@@ -1,0 +1,75 @@
+# Architectural Pattern: Serverless P2P Wake-Up & Connection Revival (PeerJS + Web Push)
+
+## Overview
+Traditional real-time peer-to-peer (P2P) architectures using **PeerJS (WebRTC)** suffer from a fundamental lifecycle constraint: mobile operating systems and modern browsers aggressively suspend or terminate background network connections to conserve battery. When a peer goes to sleep or minimizes the Progressive Web App (PWA), the WebRTC data channel drops silently.
+
+This pattern demonstrates how two browser-based PWAs can achieve a **completely serverless, bi-directional wake-up and connection-revival loop**. By exchanging browser Web Push subscription tokens directly over an initial PeerJS data channel, either PWA can act as an "application server" to wake up its sleeping peer via public push gateways (e.g., Google FCM, Apple APNs, or Mozilla Push) without requiring a dedicated cloud database or backend server.
+
+---
+
+## Core Components
+1. **PeerJS / WebRTC Data Channel**: Handles full-duplex, real-time message passing when both application instances are active in the foreground.
+2. **Service Worker & Push API**: Runs in the background of the browser, listening for push events even when the PWA window is closed or minimized.
+3. **Local VAPID Key Pair**: Generated dynamically inside each PWA client on first launch, allowing the peer to cryptographically sign web push payloads locally without a remote backend.
+4. **IndexedDB / LocalStorage**: Caches the peer's exchanged push subscription token and static Peer ID for subsequent reconnections.
+
+---
+
+## Architectural Lifecycle
+
+```
+[ PWA Client A ] <---( PeerJS WebRTC Data Channel )---> [ PWA Client B ]
+      |                                                        |
+      |--- 1. Exchange VAPID Public Keys & Push Tokens ------->|
+      |--- 2. Store Tokens in Local IndexedDB -----------------|
+      |                                                        |
+      |=== (Connection Drops / Peer Backgrounded) =============|
+      |                                                        |
+      |--- 3. Detects Drop via Heartbeat Timeout               |
+      |--- 4. Signs Web Push HTTP Request (VAPID)              |
+      +---- 5. Sends Push via Public Gateway (FCM/APNs) ------>| [ Service Worker Wakes Up ]
+      |<--- 6. Re-opens PWA & Dials PeerJS Back --------------+|
+```
+
+---
+
+## Step-by-Step Implementation Strategy
+
+### 1. Initialization and VAPID Key Generation
+On initial boot, each PWA generates a local VAPID (Voluntary Application Server Identification) key pair using standard Web Cryptography APIs (`crypto.subtle`) or a lightweight cryptographic library. This turns the browser into a self-contained push server.
+
+### 2. The Handshake & Token Exchange
+1. The two PWAs establish an initial connection out-of-band (via a local QR code scan, manual ID entry, or a temporary public signaling channel).
+2. Once the PeerJS data channel opens, both clients automatically register their respective Service Workers, request notification permissions, and execute:
+   ```javascript
+   const registration = await navigator.serviceWorker.ready;
+   const subscription = await registration.pushManager.subscribe({
+     userVisibleOnly: true,
+     applicationServerKey: urlBase64ToUint8Array(localVapidPublicKey)
+   });
+   ```
+3. Each client serializes its resulting `PushSubscription` object and transmits it across the active PeerJS channel to the other side.
+4. Both clients store the incoming peer subscription object in local `IndexedDB`.
+
+### 3. Active Heartbeat and Drop Detection
+* Both peers maintain a lightweight background heartbeat (ping/pong message every 15–30 seconds) over the PeerJS data channel.
+* If a ping times out or the `conn.on('close')` event fires, the application state shifts to **Disconnected**.
+
+### 4. Triggering the Out-of-Band Wake-Up
+When a disconnected peer needs to transmit data or trigger an action:
+1. The sender checks its local storage for the recipient's cached `PushSubscription` endpoint and encryption keys (`auth` and `p256dh`).
+2. The sender constructs a local Web Push HTTP request, cryptographically signs it using its private VAPID key, and transmits it directly to the browser push endpoint url provided in the subscription.
+3. The public push notification gateway routes the payload to the recipient's device.
+
+### 5. Service Worker Activation & Auto-Reconnection
+1. The recipient's operating system receives the push signal and wakes up the registered Service Worker.
+2. The Service Worker fires a `push` event, displaying a high-priority notification or executing a background sync script.
+3. When the user taps the notification (or via background execution where supported), the PWA window focuses, initializes PeerJS with its static Peer ID, and automatically dials back into the original peer to restore the full-duplex session.
+
+---
+
+## Trade-offs and Considerations
+
+* **Browser Push Gateway Dependency:** While this removes the requirement for a *custom* backend server, it still relies on browser vendor infrastructure (Google FCM, Apple APNs, Mozilla Push Service) to relay the initial wake-up packet.
+* **Network Stability:** Works best on local or stable networks where PeerJS can establish direct NAT traversal (STUN/TURN), falling back to push notifications only when background states intervene.
+* **Security & Keys:** Because VAPID private keys are generated and stored client-side within the browser storage, security relies on the client environment staying secure.

@@ -51,7 +51,7 @@ const DIFF_LINE_KINDS = new Set(["context", "add", "del"]);
 /** A RatingScale is one row of buttons, so it stops at ten points. */
 const RATING_MIN = 2;
 const RATING_MAX = 10;
-const MARK_MODES = new Set(["box", "point"]);
+const MARK_TOOLS = new Set(["rect", "ellipse", "arrow", "cross", "path"]);
 /** The only kinds of address the canvas will draw a picture from. Mirrors the Rust bridge. */
 const MARK_SRC_PREFIXES = ["https://", "data:image/"];
 /**
@@ -1272,22 +1272,26 @@ export function imageData(data, mime = "image/png") {
 }
 
 /**
- * Props for RegionMark: "show me where" on a picture the agent sends.
+ * Props for RegionMark: a picture the human draws on to show you what they mean.
  *
  * The Oracle case from the design doc — *draw a box around the element that is rendering wrong*
- * — without a webview and without a canvas library: the agent takes its own screenshot, sends
- * the bytes with `imageData()`, and gets back a place on that picture as fractions of it, which
- * both sides agree on however large the canvas drew it.
+ * — without a webview and without a canvas library. You take your own screenshot, send the bytes
+ * with `imageData()`, and get back the marks as vectors in fractions of the picture.
  *
- * `mode: "box"` (the default) is drawn and then sent, because a rectangle is easier to get wrong
- * than to say. `mode: "point"` is answered by the press that makes it, like a rating point. Send
- * `alt` when the picture's content matters: it is the only description a screen reader gets.
+ * It is a canvas, not a picker: the human has five pens (`rect`, `ellipse`, `arrow`, `cross` and
+ * `path`) and draws as many marks as the answer needs, because the useful answer is usually
+ * several marks and the relationship between them — circle the panel, then an arrow from it to
+ * the number that explains it. The answer lists them in the order they were drawn.
+ *
+ * `tool` is the pen the card opens on (`rect` by default) and `tools` restricts the toolbar,
+ * which is how an agent that only wants an arrow declines to ask a question with five answers.
+ * Send `alt` when the picture's content matters: it is the only description a screen reader gets.
  *
  * @param {string} src An `https:` URL, or a `data:image/...` URL from `imageData()`.
- * @param {{mode?: "box"|"point", width?: number, height?: number, alt?: string, label?: string,
- *          help?: string, submitLabel?: string}} [extra]
+ * @param {{tool?: "rect"|"ellipse"|"arrow"|"cross"|"path", tools?: string[], width?: number,
+ *          height?: number, alt?: string, label?: string, help?: string, submitLabel?: string}} [extra]
  */
-export function regionMark(src, { mode, width, height, alt, label, help, submitLabel } = {}) {
+export function regionMark(src, { tool, tools, width, height, alt, label, help, submitLabel } = {}) {
   requireString(src, "regionMark src");
   if (!MARK_SRC_PREFIXES.some((prefix) => src.startsWith(prefix))) {
     throw new AuraUIError(
@@ -1295,8 +1299,18 @@ export function regionMark(src, { mode, width, height, alt, label, help, submitL
         "canvas will not fetch a plaintext address or read a local file.",
     );
   }
-  if (mode !== undefined && !MARK_MODES.has(mode)) {
-    throw new AuraUIError(`regionMark mode must be one of ${[...MARK_MODES].join(", ")}.`);
+  if (tool !== undefined && !MARK_TOOLS.has(tool)) {
+    throw new AuraUIError(`regionMark tool must be one of ${[...MARK_TOOLS].join(", ")}.`);
+  }
+  if (tools !== undefined) {
+    requireNonEmptyArray(tools, "regionMark tools");
+    for (const pen of tools) {
+      if (!MARK_TOOLS.has(pen)) {
+        throw new AuraUIError(
+          `regionMark tools contains "${pen}", which is not one of ${[...MARK_TOOLS].join(", ")}.`,
+        );
+      }
+    }
   }
   for (const [name, value] of [
     ["width", width],
@@ -1306,7 +1320,7 @@ export function regionMark(src, { mode, width, height, alt, label, help, submitL
       throw new AuraUIError(`regionMark ${name} must be a positive whole number of pixels.`);
     }
   }
-  return compact({ src, mode, width, height, alt, label, help, submitLabel });
+  return compact({ src, tool, tools, width, height, alt, label, help, submitLabel });
 }
 
 /**

@@ -377,21 +377,18 @@ fn auto_payload(component: &str, props: &Value) -> Value {
         }
         "InteractiveChart" => json!({ "field": "__auto__", "value": Value::Null }),
         "RegionMark" => {
-            // Middle of the picture, half its width and half its height: an answer that is
-            // obviously an answer, in fractions, the way a human's box would arrive.
-            if props.get("mode").and_then(Value::as_str) == Some("point") {
-                json!({
-                    "component": component,
-                    "mode": "point",
-                    "point": { "x": 0.5, "y": 0.5 }
-                })
-            } else {
-                json!({
-                    "component": component,
-                    "mode": "box",
-                    "region": { "x": 0.25, "y": 0.25, "w": 0.5, "h": 0.5 }
-                })
-            }
+            // Two marks rather than one: a box over the middle of the picture and an X on its
+            // centre, in fractions, in the order a human would have drawn them. The second mark
+            // exists because "where" is often two things at once — this area, and that spot in
+            // it — and an auto-answer that only ever sent one shape would not exercise the
+            // arrays, the numbering or the order anything downstream depends on.
+            json!({
+                "component": component,
+                "shapes": [
+                    { "kind": "rect", "x": 0.25, "y": 0.25, "w": 0.5, "h": 0.5 },
+                    { "kind": "cross", "at": { "x": 0.5, "y": 0.5 } }
+                ]
+            })
         }
         "PairMatrix" => {
             // Each row goes to the first option it is allowed to go to, which is the pairing a

@@ -65,7 +65,7 @@ export const REGISTRY: RendererRegistry = {
   RegionMark: {
     component: RegionMark as TaskComponent,
     label: "Mark-up",
-    hint: "Show the agent where, on the picture it sent.",
+    hint: "Draw on the picture the agent sent.",
   },
   PairMatrix: {
     component: PairMatrix as TaskComponent,

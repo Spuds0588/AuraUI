@@ -31,7 +31,7 @@ _SELECT_MODES = ("none", "single", "multi")
 _DIFF_LINE_KINDS = ("context", "add", "del")
 _RATING_MIN_POINTS = 2
 _RATING_MAX_POINTS = 10
-_MARK_MODES = ("box", "point")
+_MARK_TOOLS = ("rect", "ellipse", "arrow", "cross", "path")
 #: The only kinds of address the canvas will draw a picture from. Mirrors
 #: ``MARK_SRC_PREFIXES`` in the Rust bridge.
 _MARK_SRC_PREFIXES = ("https://", "data:image/")
@@ -466,7 +466,8 @@ def image_data(data: Union[str, bytes, bytearray], mime: str = "image/png") -> s
 def region_mark(
     src: str,
     *,
-    mode: Optional[str] = None,
+    tool: Optional[str] = None,
+    tools: Optional[Sequence[str]] = None,
     width: Optional[int] = None,
     height: Optional[int] = None,
     alt: Optional[str] = None,
@@ -481,10 +482,16 @@ def region_mark(
     :func:`image_data`, and gets back a place on that picture as fractions of it, which both
     sides agree on however large the canvas drew it.
 
-    ``mode="box"`` (the default) is drawn and then sent, because a rectangle is easier to get
-    wrong than to say. ``mode="point"`` is answered by the press that makes it, like a rating
-    point. Send ``alt`` for a picture whose content matters: it is the only description a screen
-    reader gets.
+    It is a canvas, not a picker: the human has five pens (``rect``, ``ellipse``, ``arrow``,
+    ``cross`` and ``path``) and draws as many marks as the answer needs, because the useful
+    answer is usually several marks and the relationship between them — circle the panel, then
+    an arrow from it to the number that explains it. The answer lists them in the order they
+    were drawn, because "the arrow from the first box" should mean one thing to both sides.
+
+    ``tool`` is the pen the card opens on (``rect`` by default) and ``tools`` restricts the
+    toolbar, which is how an agent that only wants an arrow — *show me which way the flow goes*
+    — declines to ask a question with five answers. Send ``alt`` for a picture whose content
+    matters: it is the only description a screen reader gets.
     """
     _require_text(src, "region_mark src")
     if not src.startswith(_MARK_SRC_PREFIXES):
@@ -492,15 +499,20 @@ def region_mark(
             "region_mark src must be an https: URL or a data:image/... URL from image_data(); "
             "the canvas will not fetch a plaintext address or read a local file."
         )
-    if mode is not None:
-        _require_one_of(mode, _MARK_MODES, "region_mark mode")
+    if tool is not None:
+        _require_one_of(tool, _MARK_TOOLS, "region_mark tool")
+    if tools is not None:
+        tools = list(_require_items(tools, "region_mark tools"))
+        for pen in tools:
+            _require_one_of(pen, _MARK_TOOLS, "region_mark pen")
     for name, value in (("width", width), ("height", height)):
         if value is not None and (not isinstance(value, int) or isinstance(value, bool) or value <= 0):
             raise ValueError(f"region_mark {name} must be a positive whole number of pixels.")
     return _drop_none(
         {
             "src": src,
-            "mode": mode,
+            "tool": tool,
+            "tools": tools,
             "width": width,
             "height": height,
             "alt": alt,
