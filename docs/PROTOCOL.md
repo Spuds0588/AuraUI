@@ -871,6 +871,12 @@ One URL or a list of them, done by the human in an embedded browser inside the c
 per row. This is the first kind here that is not answered by pressing something: the answer is a
 *session*, and what comes back is what happened on each stop.
 
+It is laid out as a workspace, not a question: the queue is a column on the left and the page is a
+pane on the right, and the row the human is on decides what that pane shows. **The first unfinished
+row is open when the card appears** — there is no "open" step to press, and moving down the list
+moves the browser with it. That is the shape the job has: nine errands that share one login, worked
+top down.
+
 `items[].done` is not decoration. "Complete" with no definition is the failure mode of every
 delegated task, so the agent has to say what it will accept and the human gets to check that against
 what is on screen.
@@ -918,7 +924,7 @@ back `status: "pending"`.
 | `items[].optional` | no | Marks a row that may be skipped without stopping the answer. |
 | `session` | no | Cookies and per-origin `localStorage` to carry into the embedded browser. |
 | `openIn` | no | `embedded` or `browser`. `browser` is forced wherever no embedded view exists. |
-| `autoAdvance` | no | Default `false`. Moves the eye to the next open row when one is done. Never opens it. |
+| `autoAdvance` | no | Default `true`. Finishing a row selects the next unfinished one, which also opens its page in the pane. Set `false` to stay on the row that was just marked. |
 | `allowSkip` | no | Default `true`. |
 | `returnFiles` | no | Default `false`. Offers a file control per row, for a stop that ends in a download. |
 

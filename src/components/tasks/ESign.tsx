@@ -170,8 +170,12 @@ export default function ESign({ taskId, props, respond, resolved }: TaskComponen
     [taskId],
   );
 
+  const silent = useRef(false);
+  silent.current = locked;
+
   const emitProgress = useCallback(() => {
-    if (fields.length === 0) return;
+    // A progress frame after the answer is a frame the bridge has already closed the task for.
+    if (fields.length === 0 || silent.current) return;
     respond("change", {
       name: "esign-fields",
       value: filledCount,
