@@ -1,7 +1,8 @@
 import { useMemo, useState } from "react";
 import { AlertTriangle, Check, Info } from "lucide-react";
-import { Button } from "@/components/ui";
+import { Button, KeyHint } from "@/components/ui";
 import type { TaskComponentProps } from "@/components/renderer/types";
+import { optionKeys, useOptionKeys } from "@/lib/keyboard";
 import type { ActionOption, NoticeProps } from "@/lib/protocol";
 import { cn } from "@/lib/utils";
 
@@ -52,6 +53,17 @@ export default function Notice({ props, respond, resolved }: TaskComponentProps<
   );
   const locked = resolved || sent !== null;
 
+  // A `Notice` with follow-up buttons is a question like any other, so its buttons take keys
+  // like any other. A bare `Notice` binds nothing, because it has nothing to press.
+  const keys = useMemo(() => optionKeys(actions.length), [actions.length]);
+  useOptionKeys(() =>
+    actions.map((action, index) => ({
+      key: keys[index] ?? "",
+      run: () => choose(action),
+      disabled: locked,
+    })),
+  );
+
   const choose = (option: ActionOption) => {
     if (locked) return;
     setSent(option.id);
@@ -88,7 +100,7 @@ export default function Notice({ props, respond, resolved }: TaskComponentProps<
 
         {actions.length > 0 && !resolved ? (
           <div className="flex flex-wrap gap-2.5 pt-1">
-            {actions.map((action) => (
+            {actions.map((action, index) => (
               <Button
                 key={action.id}
                 size="sm"
@@ -106,6 +118,7 @@ export default function Notice({ props, respond, resolved }: TaskComponentProps<
                 title={action.description}
               >
                 {action.label}
+                <KeyHint keys={keys[index]} />
               </Button>
             ))}
           </div>

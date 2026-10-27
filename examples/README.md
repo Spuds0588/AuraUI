@@ -1,6 +1,6 @@
 # AuraUI examples
 
-Two scripts that do the same thing in two languages: walk a human through all eight AuraUI
+Two scripts that do the same thing in two languages: walk a human through all thirteen AuraUI
 component kinds and print every exchange as it happens. They are documentation of the happy
 path and a smoke test of the whole loop at once.
 

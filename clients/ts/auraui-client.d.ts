@@ -42,7 +42,10 @@ export type ComponentName =
   | "DataGrid"
   | "InteractiveChart"
   | "RatingScale"
-  | "DiffReview";
+  | "DiffReview"
+  | "RegionMark"
+  | "PairMatrix"
+  | "AllocateBudget";
 
 export type EventName =
   | "ready"
@@ -85,7 +88,13 @@ export interface AckFrame {
   v: string;
   type: "ack";
   taskId: string;
-  status: "rendered" | "updated" | "resolved" | "unknown";
+  status: "rendered" | "queued" | "updated" | "resolved" | "unknown";
+  /**
+   * The confirmation half of asking a person anything, present on a `task` ack only:
+   * "your question is up, expect roughly this long, and here is how often you will hear from
+   * me in the meantime". Nothing here times a question out.
+   */
+  wait?: { estimatedMs: number; pollIntervalMs: number; expiresAt: number };
 }
 
 /** What `task()` resolves with: the human's answer to one task. */
@@ -281,6 +290,137 @@ export interface DiffReviewProps {
   footnote?: string;
 }
 
+/** Where a point on a picture is, as a fraction of it. Origin is top-left, both values 0 to 1. */
+export interface MarkPoint {
+  x: number;
+  y: number;
+}
+
+/** A rectangle or an ellipse, as the box it fits inside, in fractions of the picture. */
+export interface MarkBoxShape {
+  kind: "rect" | "ellipse";
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+/** A line with a head on it: "this leads to that". */
+export interface MarkArrowShape {
+  kind: "arrow";
+  from: MarkPoint;
+  to: MarkPoint;
+}
+
+/** A single X. The cheapest way to say "here", and the only mark that needs no second point. */
+export interface MarkCrossShape {
+  kind: "cross";
+  at: MarkPoint;
+}
+
+/** Freehand: the line itself, in the order the points were drawn. */
+export interface MarkPathShape {
+  kind: "path";
+  points: MarkPoint[];
+}
+
+/**
+ * One thing the human drew, in fractions of the picture and in the order it was drawn.
+ *
+ * Fractions rather than pixels because you know the size of the image you sent and the canvas
+ * only knows how large it drew it on this screen. Order matters: "the arrow from the first box"
+ * means the same thing on both sides because the list is in the order the marks were made.
+ */
+export type MarkShape = MarkBoxShape | MarkArrowShape | MarkCrossShape | MarkPathShape;
+
+/** The five pens a RegionMark card can offer, in the order they are drawn. */
+export type MarkTool = "rect" | "ellipse" | "arrow" | "cross" | "path";
+
+/**
+ * "Show me where", as a drawing surface.
+ *
+ * You send the picture (an `https:` URL, or the bytes as a `data:` URL from `imageData()`) and get
+ * back everything the human drew on it: boxes, circles, arrows, Xs and freehand lines, as many as
+ * the answer needed, in the order they were made. The drawing is sent by a button, because a mark
+ * is chosen by making it and the release of a drag is when a person is least sure of the edge.
+ */
+export interface RegionMarkProps {
+  /** An `https:` URL, or a `data:image/...` URL from `imageData()`. Nothing else is accepted. */
+  src: string;
+  /** The pen the card opens on. Defaults to `rect`. */
+  tool?: MarkTool;
+  /** Which pens to offer, in order. Omitted means all five. A pen that does not exist is refused. */
+  tools?: MarkTool[];
+  /** The image's natural size, so the frame has the right shape before it loads. */
+  width?: number;
+  height?: number;
+  /** Alt text. Worth sending: it is the only description a screen reader gets. */
+  alt?: string;
+  label?: string;
+  help?: string;
+  /** The button that sends the drawing. */
+  submitLabel?: string;
+}
+
+/** One thing to be placed in a `PairMatrix`. */
+export interface PairRow {
+  id: string;
+  label: string;
+  description?: string;
+  /** Restrict this row to a subset of the option ids. Omitted means every option is offered. */
+  options?: string[];
+}
+
+/** One place a `PairMatrix` row can be sent to. */
+export interface PairOption {
+  id: string;
+  label: string;
+  description?: string;
+}
+
+/**
+ * "Put each of these where it belongs."
+ *
+ * One question, answered by one press per row. With `requireAll` at its default the press that
+ * places the last row is the answer, so there is no button after it; with `requireAll: false`
+ * rows may be left alone on purpose and a button appears, because the rows you left alone are
+ * part of the answer.
+ */
+export interface PairMatrixProps {
+  rows: PairRow[];
+  options: PairOption[];
+  requireAll?: boolean;
+  submitLabel?: string;
+  help?: string;
+}
+
+/** One line of an `AllocateBudget`. */
+export interface AllocationItem {
+  id: string;
+  label: string;
+  description?: string;
+  /** Floor for this line. Defaults to 0. */
+  min?: number;
+}
+
+/**
+ * "Share this out", with the parts having to add up.
+ *
+ * Every line is a number with `minus` and `plus` buttons rather than a slider, and the figure
+ * left to give is on screen the whole time. With `requireTotal` at its default the answer cannot
+ * be sent until the parts add up.
+ */
+export interface AllocateBudgetProps {
+  items: AllocationItem[];
+  /** What the parts have to add up to. */
+  total: number;
+  /** How far one press moves a line. Defaults to 1. */
+  step?: number;
+  requireTotal?: boolean;
+  submitLabel?: string;
+  help?: string;
+}
+
 /* -- options --------------------------------------------------------- */
 
 export interface AgentOptions {
@@ -306,12 +446,68 @@ export interface TaskRequest {
   timeout?: number;
 }
 
+/** One question inside an `askMany()` run. */
+export interface AskQuestion {
+  /**
+   * Becomes this question's task id. The answer comes back keyed by it, and it is what
+   * `resolve()`, `waitFor()` and `answers()` name.
+   */
+  id: string;
+  component: ComponentName;
+  props: Record<string, unknown>;
+  /** Shown on this question's card. The run's own sentence is the fallback. */
+  instruction?: string;
+  urgent?: boolean;
+}
+
+/** How many questions one `run` may carry. The bridge refuses a longer one. */
+export declare const RUN_LIMIT: number;
+
+export interface AnswersRequest {
+  /** Only these tasks. Omitted asks for everything the bridge still keeps. */
+  taskIds?: string[];
+  /** Seconds to wait for the reply. Default 5. */
+  timeout?: number;
+}
+
+/**
+ * A check-in on a question nobody has answered yet.
+ *
+ * Sent on a timer while a card is up and immediately whenever the human touches it, so an
+ * agent blocked on a person hears "still answering, here is what they have picked so far"
+ * instead of watching a silent socket.
+ */
+export interface ProgressFrame {
+  taskId: string;
+  /** `waiting` until the human touches the card, `answering` from then on. */
+  state: "waiting" | "answering";
+  elapsedMs: number;
+  estimatedMs: number;
+  /** Saturates at zero when the wait has outlasted the estimate. */
+  remainingMs: number;
+  /** Partial answers, newest first. Empty until the human does something. */
+  signals: Array<{ event: string; payload: unknown; at: number }>;
+  at: number;
+}
+
+/** An answer the bridge kept for an agent that was not waiting when it landed. */
+export interface RetainedAnswer {
+  taskId: string;
+  event: string;
+  payload: Record<string, unknown>;
+  /** The `seq` the live event carried, so a replayed answer and a seen one are the same. */
+  seq: number;
+  at: number;
+}
+
 export type AgentEventName =
   | "welcome"
   | "event"
   | "signal"
   | "answered"
   | "ack"
+  | "progress"
+  | "answers"
   | "error"
   | "close"
   | "reconnecting"
@@ -357,13 +553,46 @@ export declare class Agent {
    */
   task(request: TaskRequest): Promise<TaskAnswer>;
 
+  /**
+   * Ask several questions in one call and get every answer back together.
+   *
+   * One request, several cards: each question is drawn on its own and answered with one press,
+   * but the set arrives as a run — the card says "Question 2 of 4" — and this resolves once,
+   * with the answers in the order asked. Use it for questions you already know you need;
+   * split back into `task()` calls where each question depends on the answer to the last.
+   */
+  askMany(
+    questions: AskQuestion[],
+    request?: { runId?: string; instruction?: string; timeout?: number },
+  ): Promise<{ runId: string; answers: TaskAnswer[] }>;
+
   /** Withdraw a task before the human answers it. */
   resolve(taskId: string, reason?: string): void;
 
-  /** Queue a transient toast. */
-  notify(level: NoticeLevel, message: string): void;
+  /**
+   * Ask for answers the bridge kept: what the human said while nobody was waiting.
+   *
+   * The one thing a blocking call cannot answer for itself. AuraUI keeps every terminal event
+   * for a while, so an agent that hit its own deadline, or one restarted mid-question, can
+   * collect the answer instead of asking the person to answer twice.
+   */
+  answers(request?: AnswersRequest): Promise<RetainedAnswer[]>;
 
-  /** Narrate what the agent is doing; the newest note shows as one line while the canvas is idle. */
+  /**
+   * Keep waiting on a question this call did not wait for.
+   *
+   * Resolves from what the bridge kept if the human has since answered, and otherwise watches
+   * the socket for the terminal event exactly as `task()` would have. This is how an agent
+   * hands a wait back to the framework rather than sleeping on its own thread.
+   */
+  waitFor(taskId: string, request?: { timeout?: number }): Promise<TaskAnswer>;
+
+  /**
+   * Narrate what the agent is doing; the newest note shows as one line while the canvas is
+   * idle. This is the only way an agent says something without asking something: there is no
+   * toast, because chrome in the corner of someone else's screen says less than one quiet line
+   * inside the canvas they are already looking at.
+   */
   note(text: string, kind?: NoteKind): void;
 
   /** Patch a live task, e.g. to feed a chart drill-down after a `filter` event. */
@@ -379,6 +608,8 @@ export declare class Agent {
   on(event: "welcome", handler: (frame: WelcomeFrame) => void): () => void;
   on(event: "event" | "signal" | "answered" | "orphan", handler: (answer: TaskAnswer) => void): () => void;
   on(event: "ack", handler: (frame: AckFrame) => void): () => void;
+  on(event: "progress", handler: (frame: ProgressFrame) => void): () => void;
+  on(event: "answers", handler: (items: RetainedAnswer[]) => void): () => void;
   on(event: "error", handler: (error: AuraUIError, frame?: ErrorFrame) => void): () => void;
   on(event: "close", handler: (info: { code: number; reason: string }) => void): () => void;
   on(event: "reconnecting", handler: (info: { attempt: number; delay: number }) => void): () => void;
@@ -525,6 +756,254 @@ export declare function diffReview(
   extra?: { title?: string; footnote?: string },
 ): DiffReviewProps;
 
+/**
+ * Wrap a picture as the `data:` URL `regionMark` wants. Takes SVG text or image bytes, and works
+ * in Node and in a browser. Base64 is the normal case for a screenshot, not a workaround.
+ */
+export declare function imageData(data: string | Uint8Array, mime?: string): string;
+
+/**
+ * A picture for the human to draw on. Rejects anything but an `https:` URL or a `data:image/...`
+ * URL from `imageData()`: the canvas will not fetch a plaintext address or read a local file on
+ * the say-so of whatever opened a socket. An empty or unknown `tools` list is rejected too, since
+ * the toolbar is the question.
+ */
+export declare function regionMark(
+  src: string,
+  extra?: {
+    tool?: MarkTool;
+    tools?: MarkTool[];
+    width?: number;
+    height?: number;
+    alt?: string;
+    label?: string;
+    help?: string;
+    submitLabel?: string;
+  },
+): RegionMarkProps;
+
+/** One place a row of a `pairMatrix` can be sent to. */
+export declare function pairOption(id: string, label: string, description?: string): PairOption;
+
+/**
+ * One thing to be placed in a `pairMatrix`. `options` narrows the row to a subset of the option
+ * ids, which is how you refuse a pairing you already know is impossible.
+ */
+export declare function pairRow(
+  id: string,
+  label: string,
+  extra?: { description?: string; options?: string[] },
+): PairRow;
+
+/**
+ * Rejects empty lists, duplicated row or option ids, and a row narrowed to an option that is not
+ * in `options`: each of those is a card the human could not answer.
+ */
+export declare function pairMatrix(
+  rows: PairRow[],
+  options: PairOption[],
+  extra?: { requireAll?: boolean; submitLabel?: string; help?: string },
+): PairMatrixProps;
+
+/** One line of an `allocateBudget`, with the least it may be given. */
+export declare function allocationItem(
+  id: string,
+  label: string,
+  extra?: { description?: string; min?: number },
+): AllocationItem;
+
+/**
+ * Rejects a total below 1, a step outside 1..total, and item floors that already add up to more
+ * than the total — a card that could never be sent and would never say why.
+ */
+export declare function allocateBudget(
+  items: AllocationItem[],
+  total: number,
+  extra?: { step?: number; requireTotal?: boolean; submitLabel?: string; help?: string },
+): AllocateBudgetProps;
+
+/* ------------------------------------------------------------------ *
+ * Delegated web tasks
+ * ------------------------------------------------------------------ */
+
+/** One cookie from the session the agent was using. */
+export interface SessionCookie {
+  name: string;
+  value: string;
+  domain: string;
+  path?: string;
+  secure?: boolean;
+  /** Works: the canvas places cookies through the host's cookie API, not `document.cookie`. */
+  httpOnly?: boolean;
+  sameSite?: "lax" | "strict" | "none";
+  /** Unix seconds. Absent means a session cookie that dies with the run. */
+  expires?: number;
+}
+
+/** One origin's `localStorage`, seeded before the page's own scripts run. */
+export interface WebOrigin {
+  origin: string;
+  localStorage?: { name: string; value: string }[];
+}
+
+/**
+ * What is handed to the embedded view so the human carries on where the agent stopped.
+ *
+ * Deliberately the shape a browser automation library already holds: cookies plus per-origin
+ * storage. Every origin in it is shown to the human, by name, before anything is placed.
+ */
+export interface WebSession {
+  label?: string;
+  note?: string;
+  cookies?: SessionCookie[];
+  origins?: WebOrigin[];
+}
+
+/** One stop on a delegated list. */
+export interface WebTaskItem {
+  id: string;
+  title: string;
+  /** https, or http on this machine. */
+  url: string;
+  /** The agent's instructions for this stop. */
+  note?: string;
+  /** What finished looks like here, in the agent's words. */
+  done?: string;
+  optional?: boolean;
+}
+
+/** Props for a `WebTask`: one row or a whole queue of them. */
+export interface WebTaskProps {
+  items: WebTaskItem[];
+  title?: string;
+  intro?: string;
+  session?: WebSession;
+  /** Where to open rows. `browser` is forced wherever no embedded view exists. */
+  openIn?: "embedded" | "browser";
+  /** Move the eye to the next open row when one is marked done. Never opens it. */
+  autoAdvance?: boolean;
+  allowSkip?: boolean;
+  /** Offer a file control per row, for a stop that ends in a download. */
+  returnFiles?: boolean;
+  submitLabel?: string;
+  help?: string;
+}
+
+/** The kinds of field a signature request can place. */
+export type SignFieldKind = "text" | "date" | "initials" | "signature" | "checkbox";
+
+/** One place on a page to write something, as fractions of the page from the top left. */
+export interface SignField {
+  id: string;
+  kind: SignFieldKind;
+  page?: number;
+  label?: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  required?: boolean;
+  value?: string;
+}
+
+/** Props for an `ESign`: exactly one of a signing page and a document. */
+export interface ESignProps {
+  url?: string;
+  document?: { src: string; filename?: string; mime?: string };
+  fields?: SignField[];
+  useAcroForm?: boolean;
+  flatten?: boolean;
+  signer?: { name?: string; email?: string };
+  title?: string;
+  intro?: string;
+  returnSignedCopy?: boolean;
+  submitLabel?: string;
+  help?: string;
+  session?: WebSession;
+}
+
+/** One stop on a delegated list. Rejects anything that is not https (or http on loopback). */
+export declare function webTaskItem(
+  id: string,
+  title: string,
+  url: string,
+  extra?: { note?: string; done?: string; optional?: boolean },
+): WebTaskItem;
+
+/** Props for WebTask. Rejects an empty list, duplicate ids, more than 32 items, and bad URLs. */
+export declare function webTask(
+  items: WebTaskItem[],
+  extra?: {
+    title?: string;
+    intro?: string;
+    session?: WebSession;
+    openIn?: "embedded" | "browser";
+    autoAdvance?: boolean;
+    allowSkip?: boolean;
+    returnFiles?: boolean;
+    submitLabel?: string;
+    help?: string;
+  },
+): WebTaskProps;
+
+export declare function sessionCookie(
+  name: string,
+  value: string,
+  domain: string,
+  extra?: {
+    path?: string;
+    secure?: boolean;
+    httpOnly?: boolean;
+    sameSite?: "lax" | "strict" | "none";
+    expires?: number;
+  },
+): SessionCookie;
+
+export declare function webOrigin(
+  origin: string,
+  localStorage?: { name: string; value: string }[],
+): WebOrigin;
+
+/** Rejects a session with nothing in it, or one past the caps the bridge enforces. */
+export declare function webSession(session?: {
+  cookies?: SessionCookie[];
+  origins?: WebOrigin[];
+  label?: string;
+  note?: string;
+}): WebSession;
+
+/** One field on a page. Rejects a kind the canvas cannot draw and coordinates outside the page. */
+export declare function signField(
+  id: string,
+  kind: SignFieldKind,
+  box: {
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+    page?: number;
+    label?: string;
+    required?: boolean;
+    value?: string;
+  },
+): SignField;
+
+/** Props for ESign. Rejects anything but exactly one of `url` and `document`. */
+export declare function esign(props?: {
+  url?: string;
+  document?: { src: string; filename?: string; mime?: string };
+  fields?: SignField[];
+  useAcroForm?: boolean;
+  flatten?: boolean;
+  signer?: { name?: string; email?: string };
+  title?: string;
+  intro?: string;
+  returnSignedCopy?: boolean;
+  submitLabel?: string;
+  help?: string;
+  session?: WebSession;
+}): ESignProps;
+
 export declare const components: {
   option: typeof option;
   fieldOption: typeof fieldOption;
@@ -542,6 +1021,20 @@ export declare const components: {
   diffHunk: typeof diffHunk;
   diffLine: typeof diffLine;
   diffReview: typeof diffReview;
+  imageData: typeof imageData;
+  regionMark: typeof regionMark;
+  pairOption: typeof pairOption;
+  pairRow: typeof pairRow;
+  pairMatrix: typeof pairMatrix;
+  allocationItem: typeof allocationItem;
+  allocateBudget: typeof allocateBudget;
+  webTaskItem: typeof webTaskItem;
+  webTask: typeof webTask;
+  sessionCookie: typeof sessionCookie;
+  webOrigin: typeof webOrigin;
+  webSession: typeof webSession;
+  signField: typeof signField;
+  esign: typeof esign;
 };
 
 export default Agent;

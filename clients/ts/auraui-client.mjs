@@ -51,6 +51,14 @@ const DIFF_LINE_KINDS = new Set(["context", "add", "del"]);
 /** A RatingScale is one row of buttons, so it stops at ten points. */
 const RATING_MIN = 2;
 const RATING_MAX = 10;
+const MARK_TOOLS = new Set(["rect", "ellipse", "arrow", "cross", "path"]);
+/** The only kinds of address the canvas will draw a picture from. Mirrors the Rust bridge. */
+const MARK_SRC_PREFIXES = ["https://", "data:image/"];
+/**
+ * How many questions one `run` may carry. Mirrors `RUN_LIMIT` in the bridge, which refuses a
+ * longer one: past this a run stops being a set of questions and becomes a form.
+ */
+export const RUN_LIMIT = 12;
 /** A single task frame or event frame above this size is a bug, not a payload. */
 const MAX_FRAME_BYTES = 16 * 1024 * 1024;
 
@@ -216,6 +224,8 @@ export class Agent {
     this._reconnectAttempts = 0;
     this._reconnectTimer = null;
     this._pendingWelcome = null;
+    /** A single in-flight `answers` read, resolved by the bridge's reply. */
+    this._answersWaiter = null;
   }
 
   /* -- public state ------------------------------------------------- */
@@ -452,31 +462,141 @@ export class Agent {
       throw new AuraUIError(`Duplicate taskId "${id}" is already awaiting an answer.`);
     }
 
+    const answer = this._awaitAnswer(id, timeout);
+    try {
+      this._rawSend(
+        frameJson("task", {
+          taskId: id,
+          component,
+          instruction,
+          props,
+          urgent: urgent ? true : undefined,
+        }),
+      );
+    } catch (error) {
+      this._rejectPending(id, error);
+    }
+    return answer;
+  }
+
+  /**
+   * Ask several questions in one call, and get every answer back together.
+   *
+   * The reason this exists is how agents actually behave. An agent with four independent
+   * things to ask will fan them out as four calls, and the human then works through four
+   * cards that nothing ties together — an endless interview, with the agent's own thinking
+   * invisible between the questions. A run is that same fan-out as one request: the canvas
+   * draws each question as its own card, still one press each, but they arrive as a set ("Question
+   * 2 of 4") and this resolves once with all of them.
+   *
+   * Use it when you already know every question you need. Split back into `task()` calls at
+   * the point where question n+1 depends on the answer to question n — an adaptive interview
+   * is the thing this canvas is for, and a run of questions you will not ask is worse than
+   * asking them one at a time.
+   *
+   * @param {Array<{id: string, component: string, props: object, instruction?: string, urgent?: boolean}>} questions
+   *   One entry per question, in the order the human should be asked them. `id` is this
+   *   question's task id: it comes back on its answer, and it is what `resolve()`,
+   *   `waitFor()` and `answers()` name.
+   * @param {object} [request]
+   * @param {string} [request.runId] Groups this set in the logs; generated when omitted.
+   * @param {string} [request.instruction] One sentence for the whole set, drawn on every card.
+   * @param {number} [request.timeout] Seconds to wait *per question*. No timeout by default.
+   * @returns {Promise<{runId: string, answers: Array<object>}>} Answers in the order asked.
+   */
+  async askMany(questions, { runId, instruction, timeout } = {}) {
+    if (!Array.isArray(questions) || questions.length === 0) {
+      throw new AuraUIError("askMany() needs a non-empty array of questions.");
+    }
+    if (questions.length > RUN_LIMIT) {
+      throw new AuraUIError(
+        `askMany() carries ${questions.length} questions; a run asks at most ${RUN_LIMIT}. ` +
+          "Split it, or use one WizardForm when the questions are fields of a single thing.",
+      );
+    }
+
+    const ids = [];
+    for (const question of questions) {
+      requireString(question?.id, "question.id");
+      requireString(question?.component, "question.component");
+      if (typeof question.props !== "object" || question.props === null || Array.isArray(question.props)) {
+        throw new AuraUIError(
+          `Question "${question.id}" needs a plain props object built with the components helpers.`,
+        );
+      }
+      if (ids.includes(question.id)) {
+        throw new AuraUIError(
+          `Duplicate question id "${question.id}" in one run; each id is a task id and needs to be its own.`,
+        );
+      }
+      ids.push(question.id);
+    }
+
+    const run = runId ?? newTaskId();
+    requireString(run, "runId");
+    await this._awaitOpen();
+
+    for (const id of ids) {
+      if (this._pending.has(id)) {
+        throw new AuraUIError(`Question id "${id}" is already awaiting an answer on this client.`);
+      }
+    }
+
+    // Registered before the frame goes out, so no answer can land while a question is
+    // unknown to this client and be thrown away as an orphan.
+    const waiting = questions.map((question) => this._awaitAnswer(question.id, timeout));
+
+    try {
+      this._rawSend(
+        frameJson("run", {
+          runId: run,
+          instruction,
+          questions: questions.map((question) => ({
+            id: question.id,
+            component: question.component,
+            instruction: question.instruction,
+            props: question.props,
+            urgent: question.urgent ? true : undefined,
+          })),
+        }),
+      );
+    } catch (error) {
+      for (const id of ids) this._rejectPending(id, error);
+    }
+
+    try {
+      return { runId: run, answers: await Promise.all(waiting) };
+    } catch (error) {
+      // One question's deadline must not leave the rest registered: an answer to a question
+      // nobody is waiting for would only be logged as an orphan.
+      for (const id of ids) this._rejectPending(id, error);
+      throw error;
+    }
+  }
+
+  /**
+   * Register a wait for one task id and return the promise it settles.
+   *
+   * Shared by `task()`, `askMany()` and `waitFor()` so all three routes a question can take
+   * record the wait the same way — in particular the timer, whose message has to be true: a
+   * deadline removes the waiter, it does not withdraw the question.
+   */
+  _awaitAnswer(id, timeout) {
     return new Promise((resolve, reject) => {
       const entry = { resolve, reject, signals: [], timer: null };
       if (typeof timeout === "number" && timeout > 0) {
         entry.timer = setTimeout(() => {
           this._pending.delete(id);
-          reject(new TimeoutError(`No answer for task "${id}" within ${timeout}s.`));
+          reject(
+            new TimeoutError(
+              `No answer for task "${id}" within ${timeout}s. The question is still on ` +
+                `screen; call waitFor("${id}") or answers({ taskIds: ["${id}"] }) to collect ` +
+                "the answer if the human gave one.",
+            ),
+          );
         }, timeout * 1000);
       }
       this._pending.set(id, entry);
-
-      try {
-        this._rawSend(
-          frameJson("task", {
-            taskId: id,
-            component,
-            instruction,
-            props,
-            urgent: urgent ? true : undefined,
-          }),
-        );
-      } catch (error) {
-        clearTimeout(entry.timer);
-        this._pending.delete(id);
-        reject(error);
-      }
     });
   }
 
@@ -491,16 +611,85 @@ export class Agent {
   }
 
   /**
-   * Queue a transient toast in the AuraUI window. Does not expect a reply.
-   * @param {"info"|"success"|"warn"|"error"} level
-   * @param {string} message
-   * @returns {void}
+   * Ask the bridge for answers it kept on this session's behalf.
+   *
+   * This is the answer to the one question a blocking call cannot answer for itself: what did
+   * the human say while I was not waiting? AuraUI keeps every terminal event for a while, so
+   * an agent that hit its own deadline, or one that was restarted mid-question, can come back
+   * and collect it instead of asking the person to answer the same thing twice.
+   *
+   * @param {object} [request]
+   * @param {string[]} [request.taskIds] Only these tasks. Omitted asks for everything kept.
+   * @param {number} [request.timeout] Seconds to wait for the reply. Default 5.
+   * @returns {Promise<Array<{taskId: string, event: string, payload: object, seq: number, at: number}>>}
    */
-  notify(level, message) {
-    if (!NOTICE_LEVELS.has(level)) {
-      throw new AuraUIError(`notify level must be one of ${[...NOTICE_LEVELS].join(", ")}.`);
+  async answers({ taskIds, timeout = 5 } = {}) {
+    await this._awaitOpen();
+    if (this._answersWaiter) {
+      throw new AuraUIError("An answers() request is already in flight; await it before asking again.");
     }
-    this._rawSend(frameJson("notify", { level, message: requireString(message, "notify.message") }));
+    const ids = Array.isArray(taskIds) ? taskIds.map((id) => requireString(id, "answers.taskIds")) : undefined;
+
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this._answersWaiter = null;
+        reject(new TimeoutError(`AuraUI did not answer the answers request within ${timeout}s.`));
+      }, timeout * 1000);
+
+      this._answersWaiter = {
+        resolve: (items) => {
+          clearTimeout(timer);
+          this._answersWaiter = null;
+          resolve(items);
+        },
+        reject: (error) => {
+          clearTimeout(timer);
+          this._answersWaiter = null;
+          reject(error);
+        },
+      };
+
+      try {
+        this._rawSend(frameJson("answers", { taskIds: ids }));
+      } catch (error) {
+        clearTimeout(timer);
+        this._answersWaiter = null;
+        reject(error);
+      }
+    });
+  }
+
+  /**
+   * Keep waiting on a question this call did not wait for.
+   *
+   * The second half of the deadline story. If the bridge already holds the answer — because
+   * the human answered after a `task()` gave up, or because another agent asked — this
+   * resolves immediately from what was kept. Otherwise it watches the socket for the terminal
+   * event, exactly as `task()` would have.
+   *
+   * This is what an agent does instead of "putting itself to sleep": it hands the wait back
+   * to the framework, which is already holding a socket open for it.
+   *
+   * @param {string} taskId
+   * @param {object} [request]
+   * @param {number} [request.timeout] Seconds to wait. No timeout by default.
+   * @returns {Promise<{taskId: string, event: string, payload: object, seq: number, at: number}>}
+   */
+  async waitFor(taskId, { timeout } = {}) {
+    const id = requireString(taskId, "waitFor.taskId");
+    await this._awaitOpen();
+
+    const kept = await this.answers({ taskIds: [id] });
+    const found = kept.find((item) => item.taskId === id);
+    if (found) {
+      return { taskId: found.taskId, event: found.event, payload: found.payload ?? {}, seq: found.seq, at: found.at };
+    }
+
+    if (this._pending.has(id)) {
+      throw new AuraUIError(`Task "${id}" is already being waited on by this client.`);
+    }
+
+    return this._awaitAnswer(id, timeout);
   }
 
   /**
@@ -571,6 +760,27 @@ export class Agent {
       case "ack":
         this._emit("ack", message);
         return;
+
+      case "progress":
+        // A check-in on a question nobody has answered yet: how long it has been, whether the
+        // human has touched it, and whatever they have said on it so far.
+        this._emit("progress", {
+          taskId: message.taskId,
+          state: message.state,
+          elapsedMs: message.elapsedMs,
+          estimatedMs: message.estimatedMs,
+          remainingMs: message.remainingMs,
+          signals: message.signals ?? [],
+          at: message.at,
+        });
+        return;
+
+      case "answers": {
+        const items = Array.isArray(message.items) ? message.items : [];
+        this._emit("answers", items);
+        this._answersWaiter?.resolve(items);
+        return;
+      }
 
       case "error": {
         const error = new ProtocolError(message.code ?? "bad_frame", message.message ?? "unknown error");
@@ -645,6 +855,12 @@ export class Agent {
   _rejectAllPending(error) {
     const ids = Array.from(this._pending.keys());
     for (const id of ids) this._rejectPending(id, error);
+    // An `answers` read is waiting on the same socket, so it dies with it. Failing rather
+    // than answering "nothing kept": an empty list would read as "the human said nothing",
+    // and what it actually means is that we could not ask. Anything the bridge already holds
+    // survives, so the caller can simply ask again.
+    this._answersWaiter?.reject(error);
+    this._answersWaiter = null;
   }
 
   /**
@@ -1011,6 +1227,528 @@ export function diffReview(hunks, { title, footnote } = {}) {
   return compact({ hunks, title, footnote });
 }
 
+/**
+ * Wrap a picture as a `data:` URL, which is what `regionMark` wants.
+ *
+ * An agent showing the human a screenshot almost always has the bytes rather than an address,
+ * and that is the whole reason `regionMark` accepts nothing but `https:` and `data:image/`: the
+ * canvas will not fetch a plaintext address or read a local file on the say-so of whatever
+ * opened a socket. Base64 is not a workaround here, it is the normal case.
+ *
+ * Works in Node (through `Buffer`) and in a browser (through `btoa`), because the same client
+ * runs in both. A string is encoded as UTF-8 first, so an SVG built in code needs no file.
+ *
+ * @param {string|Uint8Array} data SVG text, or the image's bytes.
+ * @param {string} [mime] An `image/...` type. Defaults to `image/png`.
+ * @returns {string} A `data:` URL ready for `regionMark`.
+ */
+export function imageData(data, mime = "image/png") {
+  if (typeof mime !== "string" || !mime.startsWith("image/")) {
+    throw new AuraUIError('imageData mime must be an image type such as "image/png".');
+  }
+  const bytes =
+    typeof data === "string"
+      ? new TextEncoder().encode(data)
+      : data instanceof Uint8Array
+        ? data
+        : null;
+  if (bytes === null) {
+    throw new AuraUIError("imageData takes an SVG string or a Uint8Array of image bytes.");
+  }
+
+  let base64;
+  if (typeof Buffer !== "undefined") {
+    base64 = Buffer.from(bytes).toString("base64");
+  } else {
+    // Chunked: `String.fromCharCode(...bytes)` throws on a screenshot-sized argument list.
+    let binary = "";
+    const CHUNK = 0x8000;
+    for (let offset = 0; offset < bytes.length; offset += CHUNK) {
+      binary += String.fromCharCode(...bytes.subarray(offset, offset + CHUNK));
+    }
+    base64 = btoa(binary);
+  }
+  return `data:${mime};base64,${base64}`;
+}
+
+/**
+ * Props for RegionMark: a picture the human draws on to show you what they mean.
+ *
+ * The Oracle case from the design doc — *draw a box around the element that is rendering wrong*
+ * — without a webview and without a canvas library. You take your own screenshot, send the bytes
+ * with `imageData()`, and get back the marks as vectors in fractions of the picture.
+ *
+ * It is a canvas, not a picker: the human has five pens (`rect`, `ellipse`, `arrow`, `cross` and
+ * `path`) and draws as many marks as the answer needs, because the useful answer is usually
+ * several marks and the relationship between them — circle the panel, then an arrow from it to
+ * the number that explains it. The answer lists them in the order they were drawn.
+ *
+ * `tool` is the pen the card opens on (`rect` by default) and `tools` restricts the toolbar,
+ * which is how an agent that only wants an arrow declines to ask a question with five answers.
+ * Send `alt` when the picture's content matters: it is the only description a screen reader gets.
+ *
+ * @param {string} src An `https:` URL, or a `data:image/...` URL from `imageData()`.
+ * @param {{tool?: "rect"|"ellipse"|"arrow"|"cross"|"path", tools?: string[], width?: number,
+ *          height?: number, alt?: string, label?: string, help?: string, submitLabel?: string}} [extra]
+ */
+export function regionMark(src, { tool, tools, width, height, alt, label, help, submitLabel } = {}) {
+  requireString(src, "regionMark src");
+  if (!MARK_SRC_PREFIXES.some((prefix) => src.startsWith(prefix))) {
+    throw new AuraUIError(
+      "regionMark src must be an https: URL or a data:image/... URL from imageData(); the " +
+        "canvas will not fetch a plaintext address or read a local file.",
+    );
+  }
+  if (tool !== undefined && !MARK_TOOLS.has(tool)) {
+    throw new AuraUIError(`regionMark tool must be one of ${[...MARK_TOOLS].join(", ")}.`);
+  }
+  if (tools !== undefined) {
+    requireNonEmptyArray(tools, "regionMark tools");
+    for (const pen of tools) {
+      if (!MARK_TOOLS.has(pen)) {
+        throw new AuraUIError(
+          `regionMark tools contains "${pen}", which is not one of ${[...MARK_TOOLS].join(", ")}.`,
+        );
+      }
+    }
+  }
+  for (const [name, value] of [
+    ["width", width],
+    ["height", height],
+  ]) {
+    if (value !== undefined && (!Number.isInteger(value) || value <= 0)) {
+      throw new AuraUIError(`regionMark ${name} must be a positive whole number of pixels.`);
+    }
+  }
+  return compact({ src, tool, tools, width, height, alt, label, help, submitLabel });
+}
+
+/**
+ * One place a `pairMatrix` row can be sent to, drawn as a button on every row that offers it.
+ *
+ * @param {string} id The answer that comes back for a row sent here.
+ * @param {string} label What the human reads on the button.
+ * @param {string} [description] A second line, for an option that needs one clause explaining it.
+ */
+export function pairOption(id, label, description) {
+  requireString(id, "pairOption id");
+  requireString(label, "pairOption label");
+  return compact({ id, label, description });
+}
+
+/**
+ * One thing to be placed in a `pairMatrix`.
+ *
+ * `options` narrows this row to a subset of the option ids, which is how an agent refuses a
+ * pairing it already knows is impossible rather than asking the human not to pick it. Leave it
+ * out to offer every option.
+ *
+ * @param {string} id The key this row comes back under.
+ * @param {string} label The thing being placed.
+ * @param {{description?: string, options?: string[]}} [extra]
+ */
+export function pairRow(id, label, { description, options } = {}) {
+  requireString(id, "pairRow id");
+  requireString(label, "pairRow label");
+  if (options !== undefined) {
+    requireNonEmptyArray(options, `options for pair row "${id}"`);
+    for (const optionId of options) requireString(optionId, `pair row "${id}" option id`);
+  }
+  return compact({ id, label, description, options });
+}
+
+/**
+ * Props for PairMatrix: "put each of these where it belongs".
+ *
+ * One question — which bucket each row goes in — answered by one press per row, the way a
+ * `sortableList` is one question answered by one drag per item. With `requireAll` at its default
+ * the press that places the last row *is* the answer, so there is no button after it; pass
+ * `requireAll: false` to let rows be left alone on purpose ("which of these are the same bug?"),
+ * in which case a button does appear, because the rows you left alone are part of the answer.
+ *
+ * @param {object[]} rows Built with `pairRow()`.
+ * @param {object[]} options Built with `pairOption()`.
+ * @param {{requireAll?: boolean, submitLabel?: string, help?: string}} [extra]
+ */
+export function pairMatrix(rows, options, { requireAll, submitLabel, help } = {}) {
+  requireNonEmptyArray(rows, "pairMatrix rows");
+  requireNonEmptyArray(options, "pairMatrix options");
+
+  const optionIds = new Set();
+  options.forEach((option, index) => {
+    if (typeof option !== "object" || option === null) {
+      throw new AuraUIError(`pairMatrix option ${index + 1} must be an object from pairOption().`);
+    }
+    requireString(option.id, `pairMatrix option ${index + 1} id`);
+    if (optionIds.has(option.id)) {
+      throw new AuraUIError(`pairMatrix option id "${option.id}" is used twice.`);
+    }
+    optionIds.add(option.id);
+  });
+
+  const rowIds = new Set();
+  rows.forEach((row, index) => {
+    if (typeof row !== "object" || row === null) {
+      throw new AuraUIError(`pairMatrix row ${index + 1} must be an object from pairRow().`);
+    }
+    requireString(row.id, `pairMatrix row ${index + 1} id`);
+    if (rowIds.has(row.id)) {
+      throw new AuraUIError(`pairMatrix row id "${row.id}" is used twice.`);
+    }
+    rowIds.add(row.id);
+    for (const allowed of row.options ?? []) {
+      if (!optionIds.has(allowed)) {
+        throw new AuraUIError(
+          `pairMatrix row "${row.id}" is narrowed to option "${allowed}", which is not one of " +
+            "the options.`,
+        );
+      }
+    }
+  });
+
+  return compact({ rows, options, requireAll, submitLabel, help });
+}
+
+/**
+ * One line of an `allocateBudget`, with the least it may be given.
+ *
+ * @param {string} id The key this line comes back under.
+ * @param {string} label What the human reads on the line.
+ * @param {{description?: string, min?: number}} [extra]
+ */
+export function allocationItem(id, label, { description, min } = {}) {
+  requireString(id, "allocationItem id");
+  requireString(label, "allocationItem label");
+  if (min !== undefined && (!Number.isInteger(min) || min < 0)) {
+    throw new AuraUIError(`allocationItem "${id}" min must be a whole number of units, 0 or more.`);
+  }
+  return compact({ id, label, description, min });
+}
+
+/**
+ * Props for AllocateBudget: "share this out", with the parts having to add up.
+ *
+ * One press moves a line by `step`, and the canvas shows how much is left the whole time. That is
+ * the reason this is a row of steppers rather than a row of sliders: a slider cannot say how far
+ * one press goes, and it never says what is left over, so a human slides five of them, lands a
+ * little off, and sends it anyway.
+ *
+ * The floors are checked here as well as in the bridge, because `min` values that already overrun
+ * `total` draw a card the human can never send — and never learns why.
+ *
+ * @param {object[]} items Built with `allocationItem()`.
+ * @param {number} total What the parts have to add up to.
+ * @param {{step?: number, requireTotal?: boolean, submitLabel?: string, help?: string}} [extra]
+ */
+export function allocateBudget(items, total, { step, requireTotal, submitLabel, help } = {}) {
+  requireNonEmptyArray(items, "allocateBudget items");
+  if (!Number.isInteger(total) || total < 1) {
+    throw new AuraUIError("allocateBudget total must be a whole number of units, 1 or more.");
+  }
+  if (step !== undefined && (!Number.isInteger(step) || step < 1 || step > total)) {
+    throw new AuraUIError(`allocateBudget step must be a whole number between 1 and ${total}.`);
+  }
+
+  const seen = new Set();
+  let floors = 0;
+  items.forEach((item, index) => {
+    if (typeof item !== "object" || item === null) {
+      throw new AuraUIError(
+        `allocateBudget item ${index + 1} must be an object from allocationItem().`,
+      );
+    }
+    requireString(item.id, `allocateBudget item ${index + 1} id`);
+    if (seen.has(item.id)) {
+      throw new AuraUIError(`allocateBudget item id "${item.id}" is used twice.`);
+    }
+    seen.add(item.id);
+    floors += item.min ?? 0;
+  });
+  if (floors > total) {
+    throw new AuraUIError(
+      `allocateBudget item minimums add up to ${floors}, more than the total (${total}): the ` +
+        "card could never reach its own total, so it would never be sendable.",
+    );
+  }
+
+  return compact({ items, total, step, requireTotal, submitLabel, help });
+}
+
+/**
+ * Check an address a delegated web task will open, the same way the bridge does.
+ *
+ * `https` only, except on loopback: a local tool is a legitimate thing to delegate to, and the
+ * bridge itself is loopback-only for the same reason. Checked here as well as on the wire because
+ * the failure this catches is an agent building a whole list around a URL that will be refused.
+ */
+function requireWebUrl(value, what) {
+  requireString(value, what);
+  const lower = String(value).toLowerCase();
+  if (lower.startsWith("https://")) return;
+  if (lower.startsWith("http://")) {
+    const host = lower.slice(7).split(/[/?#]/)[0].split("@").pop().replace(/^\[/, "").split("]")[0];
+    const bare = host.split(":")[0];
+    if (bare === "localhost" || bare === "::1" || bare.startsWith("127.") || bare.endsWith(".localhost")) {
+      return;
+    }
+    throw new AuraUIError(
+      `${what} is "${value}", which is plain http: a delegated web task has to travel over https, ` +
+        "unless it points at this machine (localhost, 127.0.0.1, ::1).",
+    );
+  }
+  throw new AuraUIError(
+    `${what} is "${value}", and a delegated web task only takes an https: address. javascript:, ` +
+      "data: and file: are refused by name.",
+  );
+}
+
+/**
+ * One stop on a delegated list.
+ *
+ * @param {string} id The key this row comes back under.
+ * @param {string} title What the human reads in the list.
+ * @param {string} url Where it goes. https, or http on this machine.
+ * @param {{note?: string, done?: string, optional?: boolean}} [extra]
+ */
+export function webTaskItem(id, title, url, { note, done, optional } = {}) {
+  requireString(id, "webTaskItem id");
+  requireString(title, "webTaskItem title");
+  requireWebUrl(url, `webTaskItem "${id}" url`);
+  if (done !== undefined) {
+    requireString(done, `webTaskItem "${id}" done`);
+  }
+  return compact({ id, title, url, note, done, optional });
+}
+
+/**
+ * One cookie from the session the agent was using.
+ *
+ * `httpOnly` works because the canvas places cookies through the host's cookie API rather than
+ * through `document.cookie`, which is the only way a real login cookie can be handed over at all.
+ *
+ * @param {string} name
+ * @param {string} value
+ * @param {string} domain
+ * @param {{path?: string, secure?: boolean, httpOnly?: boolean,
+ *          sameSite?: "lax"|"strict"|"none", expires?: number}} [extra]
+ */
+export function sessionCookie(name, value, domain, extra = {}) {
+  requireString(name, "sessionCookie name");
+  requireString(domain, "sessionCookie domain");
+  return compact({ name, value, domain, ...extra });
+}
+
+/**
+ * One origin's `localStorage`, as the pairs it is written back out in.
+ *
+ * @param {string} origin The full origin, `https://example.com`. Matched exactly.
+ * @param {{name: string, value: string}[]} localStorage
+ */
+export function webOrigin(origin, localStorage = []) {
+  requireString(origin, "webOrigin origin");
+  if (!/^https?:\/\//.test(origin)) {
+    throw new AuraUIError(
+      `webOrigin "${origin}" has to be a full origin (https://example.com), because the canvas ` +
+        "seeds storage by exact origin match.",
+    );
+  }
+  return compact({ origin, localStorage });
+}
+
+/**
+ * Props for WebTask: a list of pages to work through, with somewhere to write down what happened.
+ *
+ * The shape an agent's own browser session already has: cookies plus per-origin localStorage, so a
+ * dump of what it was holding is a valid argument here rather than something to transform.
+ *
+ * @param {{cookies?: object[], origins?: object[], label?: string, note?: string}} [session]
+ */
+export function webSession({ cookies = [], origins = [], label, note } = {}) {
+  if (cookies.length === 0 && origins.length === 0) {
+    throw new AuraUIError(
+      "webSession needs at least one cookie or one origin: there is nothing to hand over, and " +
+        "nothing for the human to be asked about.",
+    );
+  }
+  if (cookies.length > 200) {
+    throw new AuraUIError("webSession carries more than 200 cookies: a session is not a cookie jar.");
+  }
+  if (origins.length > 32) {
+    throw new AuraUIError("webSession names more than 32 origins.");
+  }
+  return compact({ label, note, cookies, origins });
+}
+
+/**
+ * Props for WebTask: "go and do these on the web for me".
+ *
+ * A list rather than one URL at a time, because that is what the job usually is: nine stops that
+ * all need the same login. One card carries the queue, a row can be skipped, and the answer is the
+ * whole board with a note per row.
+ *
+ * @param {object[]} items Built with `webTaskItem()`.
+ * @param {{title?: string, intro?: string, session?: object, openIn?: "embedded"|"browser",
+ *          autoAdvance?: boolean, allowSkip?: boolean, returnFiles?: boolean,
+ *          submitLabel?: string, help?: string}} [extra]
+ */
+export function webTask(items, {
+  title,
+  intro,
+  session,
+  openIn,
+  autoAdvance,
+  allowSkip,
+  returnFiles,
+  submitLabel,
+  help,
+} = {}) {
+  requireNonEmptyArray(items, "webTask items");
+  if (items.length > 32) {
+    throw new AuraUIError(
+      `webTask carries ${items.length} items and the cap is 32: send a second card when the first ` +
+        "is done rather than one list nobody can see the end of.",
+    );
+  }
+  const seen = new Set();
+  items.forEach((item, index) => {
+    if (typeof item !== "object" || item === null) {
+      throw new AuraUIError(`webTask item ${index + 1} must be an object from webTaskItem().`);
+    }
+    requireString(item.id, `webTask item ${index + 1} id`);
+    if (seen.has(item.id)) {
+      throw new AuraUIError(
+        `webTask item id "${item.id}" is used twice: the answer is keyed by id, so a duplicate ` +
+          "could not say which row was done.",
+      );
+    }
+    seen.add(item.id);
+  });
+  if (openIn !== undefined && openIn !== "embedded" && openIn !== "browser") {
+    throw new AuraUIError('webTask openIn must be "embedded" or "browser".');
+  }
+  return compact({
+    items,
+    title,
+    intro,
+    session,
+    openIn,
+    autoAdvance,
+    allowSkip,
+    returnFiles,
+    submitLabel,
+    help,
+  });
+}
+
+const SIGN_FIELD_KINDS = ["text", "date", "initials", "signature", "checkbox"];
+
+/**
+ * One place on a page to write something.
+ *
+ * Coordinates are fractions of the page with the origin at the top left, which is the same language
+ * `regionMark` uses for marks on a picture: the agent knows the page it sent, the canvas knows how
+ * large it drew it, and a fraction is the one coordinate both agree on without being told the
+ * other's size.
+ *
+ * @param {string} id The key this field's value comes back under, or the PDF's own field name.
+ * @param {"text"|"date"|"initials"|"signature"|"checkbox"} kind
+ * @param {{x: number, y: number, w: number, h: number, page?: number, label?: string,
+ *          required?: boolean, value?: string}} box
+ */
+export function signField(id, kind, { x, y, w, h, page, label, required, value } = {}) {
+  requireString(id, "signField id");
+  if (!SIGN_FIELD_KINDS.includes(kind)) {
+    throw new AuraUIError(
+      `signField "${id}" kind must be one of ${SIGN_FIELD_KINDS.join(", ")}, not "${kind}".`,
+    );
+  }
+  for (const [key, value_] of Object.entries({ x, y, w, h })) {
+    if (typeof value_ !== "number" || value_ < 0 || value_ > 1) {
+      throw new AuraUIError(
+        `signField "${id}" ${key} must be a number between 0 and 1, as a fraction of the page.`,
+      );
+    }
+  }
+  if (page !== undefined && (!Number.isInteger(page) || page < 1)) {
+    throw new AuraUIError(`signField "${id}" page is one-based, so it starts at 1.`);
+  }
+  return compact({ id, kind, page, label, x, y, w, h, required, value });
+}
+
+/**
+ * Props for ESign: "sign this".
+ *
+ * Exactly one of `url` and `document`. A `url` is a signing page at a provider — the human signs
+ * there and the card collects a confirmation plus whatever copy they attach. A `document` is the PDF
+ * itself, and the canvas does more with it: it renders the pages, puts a box where each field goes,
+ * takes a drawn or typed signature, fills the document and hands the bytes back.
+ *
+ * `fields` matters most for documents with no form in them at all, which is most of what a person is
+ * asked to sign: the agent says where the signature goes by coordinate and the canvas draws it there.
+ * When the document *does* carry a form, those fields are picked up by name and merged with these.
+ *
+ * @param {{url?: string,
+ *          document?: {src: string, filename?: string, mime?: string},
+ *          fields?: object[], useAcroForm?: boolean, flatten?: boolean,
+ *          signer?: {name?: string, email?: string}, title?: string, intro?: string,
+ *          returnSignedCopy?: boolean, submitLabel?: string, help?: string,
+ *          session?: object}} [props]
+ */
+export function esign({
+  url,
+  document,
+  fields,
+  useAcroForm,
+  flatten,
+  signer,
+  title,
+  intro,
+  returnSignedCopy,
+  submitLabel,
+  help,
+  session,
+} = {}) {
+  if ((url ? 1 : 0) + (document ? 1 : 0) !== 1) {
+    throw new AuraUIError(
+      "esign needs exactly one of url (a signing page) and document (the PDF to fill and sign).",
+    );
+  }
+  if (url !== undefined) requireWebUrl(url, "esign url");
+  if (document !== undefined) {
+    if (typeof document !== "object" || document === null) {
+      throw new AuraUIError("esign document must be { src, filename?, mime? }.");
+    }
+    requireString(document.src, "esign document src");
+    if (!String(document.src).startsWith("data:")) {
+      requireWebUrl(document.src, "esign document src");
+    } else if (!String(document.src).startsWith("data:application/pdf")) {
+      throw new AuraUIError(
+        "esign document src is a data URL that is not a PDF: this component fills PDF documents.",
+      );
+    }
+  }
+  if (fields !== undefined) {
+    if (!Array.isArray(fields)) throw new AuraUIError("esign fields must be an array from signField().");
+    if (fields.length > 64) {
+      throw new AuraUIError(`esign carries ${fields.length} fields and the cap is 64.`);
+    }
+  }
+  return compact({
+    url,
+    document,
+    fields,
+    useAcroForm,
+    flatten,
+    signer,
+    title,
+    intro,
+    returnSignedCopy,
+    submitLabel,
+    help,
+    session,
+  });
+}
+
 /** Namespace holding every prop builder, for `import { components as c }`. */
 export const components = {
   option,
@@ -1029,6 +1767,20 @@ export const components = {
   diffHunk,
   diffLine,
   diffReview,
+  imageData,
+  regionMark,
+  pairOption,
+  pairRow,
+  pairMatrix,
+  allocationItem,
+  allocateBudget,
+  webTaskItem,
+  webTask,
+  sessionCookie,
+  webOrigin,
+  webSession,
+  signField,
+  esign,
 };
 
 export default Agent;

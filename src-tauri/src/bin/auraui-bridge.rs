@@ -170,9 +170,6 @@ impl UiSink for StdoutSink {
                     resolve.reason.as_deref().unwrap_or("")
                 );
             }
-            AgentFrame::Notify(notify) => {
-                println!("[notify] {:?} {}", notify.level, notify.message);
-            }
             AgentFrame::Note(note) => {
                 println!("[note] {}", note.text);
             }
@@ -181,6 +178,13 @@ impl UiSink for StdoutSink {
             }
             // Answered with a `pong` by the bridge itself; nothing to show.
             AgentFrame::Ping(_) => {}
+            // Answered with the retained answers by the bridge itself. Printing it here would
+            // be a copy of what the asking agent already receives.
+            AgentFrame::Answers(_) => {}
+            // Expanded into one `task` per question before it reaches any surface, so this
+            // sink only ever sees the individual questions. Left silent rather than printing
+            // twice.
+            AgentFrame::Run(_) => {}
         }
 
         // A terminal printing every frame is a real human-facing surface.
@@ -269,6 +273,9 @@ fn auto_event(component: &str, props: &Value) -> Option<EventName> {
         // Both of these confirm with a submit, like a form: the human picks or decides and
         // then says so, rather than the first press being the answer.
         "RatingScale" | "DiffReview" => Some(EventName::Submit),
+        // A mark-up only confirms in `box` mode — a marked point is answered by the press that
+        // makes it — but the event is a `submit` either way, so one arm covers both.
+        "RegionMark" | "PairMatrix" | "AllocateBudget" => Some(EventName::Submit),
         "Notice" if first_action(component, props).is_some() => Some(EventName::Action),
         _ => None,
     }
@@ -369,6 +376,115 @@ fn auto_payload(component: &str, props: &Value) -> Value {
             json!({ "component": component, "rowIds": row_ids })
         }
         "InteractiveChart" => json!({ "field": "__auto__", "value": Value::Null }),
+        "RegionMark" => {
+            // Two marks rather than one: a box over the middle of the picture and an X on its
+            // centre, in fractions, in the order a human would have drawn them. The second mark
+            // exists because "where" is often two things at once — this area, and that spot in
+            // it — and an auto-answer that only ever sent one shape would not exercise the
+            // arrays, the numbering or the order anything downstream depends on.
+            json!({
+                "component": component,
+                "shapes": [
+                    { "kind": "rect", "x": 0.25, "y": 0.25, "w": 0.5, "h": 0.5 },
+                    { "kind": "cross", "at": { "x": 0.5, "y": 0.5 } }
+                ]
+            })
+        }
+        "PairMatrix" => {
+            // Each row goes to the first option it is allowed to go to, which is the pairing a
+            // human clicking top-down would produce.
+            let options: Vec<&str> = props
+                .get("options")
+                .and_then(Value::as_array)
+                .map(|options| {
+                    options
+                        .iter()
+                        .filter_map(|option| option.get("id").and_then(Value::as_str))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            let mut pairs = serde_json::Map::new();
+            let mut unassigned: Vec<String> = Vec::new();
+            if let Some(rows) = props.get("rows").and_then(Value::as_array) {
+                for row in rows {
+                    let Some(row_id) = row.get("id").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    let allowed: Vec<&str> = row
+                        .get("options")
+                        .and_then(Value::as_array)
+                        .map(|allowed| {
+                            allowed
+                                .iter()
+                                .filter_map(|id| id.as_str())
+                                .collect()
+                        })
+                        .filter(|allowed: &Vec<&str>| !allowed.is_empty())
+                        .unwrap_or_else(|| options.clone());
+                    match allowed.first() {
+                        Some(option_id) => {
+                            pairs.insert(row_id.to_string(), json!(option_id));
+                        }
+                        // Only reachable for a row narrowed to nothing, which the validator
+                        // already refuses: say so in the payload rather than invent a pairing.
+                        None => unassigned.push(row_id.to_string()),
+                    }
+                }
+            }
+            json!({
+                "component": component,
+                "pairs": pairs,
+                "unassigned": unassigned
+            })
+        }
+        "AllocateBudget" => {
+            // The same round-robin the canvas uses behind `Spread evenly`, so an automated run
+            // answers the way a human who pressed that button and then sent would.
+            let total = props.get("total").and_then(Value::as_i64).unwrap_or(0);
+            let step = props
+                .get("step")
+                .and_then(Value::as_i64)
+                .filter(|step| *step > 0)
+                .unwrap_or(1);
+            let mut shares: Vec<(String, i64)> = Vec::new();
+            let mut left = total;
+            if let Some(items) = props.get("items").and_then(Value::as_array) {
+                for item in items {
+                    let id = item
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .unwrap_or("item")
+                        .to_string();
+                    let floor = item
+                        .get("min")
+                        .and_then(Value::as_i64)
+                        .filter(|min| *min > 0)
+                        .unwrap_or(0);
+                    left -= floor;
+                    shares.push((id, floor));
+                }
+            }
+            let mut index = 0;
+            while left > 0 && !shares.is_empty() {
+                let slot = index % shares.len();
+                let bite = step.min(left);
+                shares[slot].1 += bite;
+                left -= bite;
+                index += 1;
+            }
+            let allocations = Value::Object(
+                shares
+                    .into_iter()
+                    .map(|(id, value)| (id, json!(value)))
+                    .collect(),
+            );
+            json!({
+                "component": component,
+                "allocations": allocations,
+                "total": total
+            })
+        }
         _ => json!({ "component": component }),
     }
 }

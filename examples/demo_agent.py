@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """AuraUI demo agent — the happy path, in one readable script.
 
-Walks a human through all eight AuraUI component kinds in turn: an ActionCard triage
+Walks a human through all thirteen AuraUI component kinds in turn: an ActionCard triage
 choice, a short WizardForm/ActionCard incident interview, a DataGrid row pick, a
 SortableList ordering, an InteractiveChart drill-down, a RatingScale confidence check,
-a per-hunk DiffReview, and a closing Notice. Every answer is printed as it arrives, so
-the script doubles as a smoke test of the whole loop.
+a per-hunk DiffReview, a RegionMark drawing on a picture, a PairMatrix, an AllocateBudget, a
+WebTask queue, an ESign, and a closing Notice. Every answer is printed as it arrives, so the script doubles as a smoke
+test of the whole loop.
 
 Every card asks exactly one question. AuraUI shows one question at a time, so a card that
 packs several parts would be answered in part: the incident report is therefore a run of
@@ -93,6 +94,36 @@ REVENUE_SPEC: Dict[str, Any] = {
 
 # The patch the agent wants reviewed. The agent splits its own diff into hunks and marks
 # every line; AuraUI renders what it is handed and never computes a diff itself.
+# The picture the RegionMark question draws on.
+#
+# An SVG rather than a PNG, and inline rather than fetched, so the script works from a cleared
+# checkout with no assets and no network. An agent marking a *real* screenshot passes its bytes
+# to ``c.image_data`` the same way; the rule it demonstrates is that the picture travels with the
+# question rather than as an address the canvas has to go and fetch.
+DASHBOARD_SVG = """<svg xmlns="http://www.w3.org/2000/svg" width="960" height="600" viewBox="0 0 960 600">
+  <rect width="960" height="600" fill="#0b1220"/>
+  <rect x="24" y="24" width="912" height="52" rx="8" fill="#111c30" stroke="#1e293b"/>
+  <text x="44" y="56" fill="#94a3b8" font-family="sans-serif" font-size="17">staging / checkout</text>
+  <text x="780" y="56" fill="#f59e0b" font-family="sans-serif" font-size="17">degraded</text>
+  <rect x="24" y="96" width="288" height="168" rx="10" fill="#111c30" stroke="#1e293b"/>
+  <text x="44" y="128" fill="#64748b" font-family="sans-serif" font-size="14">p95 latency</text>
+  <text x="44" y="176" fill="#e2e8f0" font-family="sans-serif" font-size="34">412ms</text>
+  <text x="44" y="204" fill="#f87171" font-family="sans-serif" font-size="14">+318% vs median</text>
+  <rect x="336" y="96" width="288" height="168" rx="10" fill="#111c30" stroke="#1e293b"/>
+  <text x="356" y="128" fill="#64748b" font-family="sans-serif" font-size="14">charge success</text>
+  <text x="356" y="176" fill="#e2e8f0" font-family="sans-serif" font-size="34">98.4%</text>
+  <text x="356" y="204" fill="#34d399" font-family="sans-serif" font-size="14">steady</text>
+  <rect x="648" y="96" width="288" height="168" rx="10" fill="#111c30" stroke="#1e293b"/>
+  <text x="668" y="128" fill="#64748b" font-family="sans-serif" font-size="14">error rate</text>
+  <text x="668" y="176" fill="#e2e8f0" font-family="sans-serif" font-size="34">6.1%</text>
+  <text x="668" y="204" fill="#f87171" font-family="sans-serif" font-size="14">climbing</text>
+  <rect x="24" y="288" width="912" height="288" rx="10" fill="#111c30" stroke="#1e293b"/>
+  <text x="44" y="320" fill="#64748b" font-family="sans-serif" font-size="14">requests per minute, last hour</text>
+  <polyline points="44,530 120,522 196,506 272,470 348,412 424,350 500,392 576,428 652,470 728,498 804,512 880,520" fill="none" stroke="#38bdf8" stroke-width="3"/>
+  <line x1="272" y1="348" x2="272" y2="556" stroke="#334155" stroke-width="1"/>
+  <text x="272" y="344" fill="#64748b" font-family="sans-serif" font-size="12" text-anchor="middle">deploy 2026.10.4</text>
+</svg>"""
+
 PATCH_HUNKS: List[Dict[str, Any]] = [
     c.diff_hunk(
         "reducer-guard",
@@ -399,7 +430,173 @@ def run(agent: Agent) -> None:
     print(f"  (review: {len(accepted)} accepted, {len(rejected)} rejected)")
     print()
 
-    # 8. Notice ------------------------------------------------------------
+    # 8. RegionMark --------------------------------------------------------
+    # "Show me where it is wrong." The agent already has the picture — it took the screenshot
+    # itself — so the bytes travel with the question, and what comes back is the drawing: boxes,
+    # circles, arrows, Xs and freehand lines, as fractions of the picture rather than pixels on
+    # somebody's monitor.
+    marked = ask(
+        agent,
+        "RegionMark drawing on the staging dashboard",
+        component="RegionMark",
+        instruction="Circle the panel that looks wrong, and point at anything worth reading from "
+                    "it. Draw as much as you need.",
+        props=c.region_mark(
+            c.image_data(DASHBOARD_SVG, "image/svg+xml"),
+            width=960,
+            height=600,
+            alt="staging checkout dashboard: p95 latency 412ms, charge success 98.4%, "
+                "error rate 6.1%, and a request-rate chart",
+            label="staging / checkout, 960x600",
+            help="Pick a pen and draw. Backspace takes back the last mark.",
+        ),
+    )
+    shapes = (marked.get("payload") or {}).get("shapes") or []
+    drawn = ", ".join(
+        {"rect": "box", "ellipse": "circle", "arrow": "arrow", "cross": "X",
+         "path": "line"}.get(shape.get("kind"), "mark")
+        for shape in shapes
+    ) or "nothing"
+    agent.note(f"Drawing received: {len(shapes)} mark(s) — {drawn}.", kind="meta")
+    print()
+
+    # 9. PairMatrix --------------------------------------------------------
+    paired = ask(
+        agent,
+        f"PairMatrix {len(ANOMALIES)} failing runs to a team",
+        component="PairMatrix",
+        instruction="Put each failing run with the team that should hear about it first. The "
+                    "press that places the last one sends the lot.",
+        props=c.pair_matrix(
+            [
+                c.pair_row(
+                    row["id"],
+                    f"{row['service']} — {row['window']}",
+                    description=f"p99 {row['p99_ms']} ms, {row['error_rate']}% errors",
+                )
+                for row in ANOMALIES[:3]
+            ],
+            [
+                c.pair_option("checkout", "Checkout team"),
+                c.pair_option("payments", "Payments team"),
+                c.pair_option("platform", "Platform team"),
+            ],
+            help="Every row needs a home; the last press is the answer, so there is no button "
+                 "after it.",
+        ),
+    )
+    pairs = (paired.get("payload") or {}).get("pairs") or {}
+    agent.note(f"Routing: {pairs}.", kind="meta")
+    print()
+
+    # 10. AllocateBudget ---------------------------------------------------
+    budget = ask(
+        agent,
+        "AllocateBudget 40 minutes of verification",
+        component="AllocateBudget",
+        instruction="I have 40 minutes of verification budget before the next deploy window. "
+                    "Where should it go?",
+        props=c.allocate_budget(
+            [
+                c.allocation_item("repro", "Reproduce the slow checkout"),
+                c.allocation_item("bisect", "Bisect the cart reducer"),
+                c.allocation_item("load", "Load-test the charge path"),
+                c.allocation_item("docs", "Write up what we found"),
+            ],
+            40,
+            step=5,
+            help="It has to add up to 40 before I can take it.",
+        ),
+    )
+    split = (budget.get("payload") or {}).get("allocations") or {}
+    agent.note(f"Budget taken: {split}.", kind="meta")
+    print()
+
+    # 11. WebTask ----------------------------------------------------------
+    # The first kind here that is not answered by pressing something: the human works through
+    # pages on the web and reports back what happened on each one.
+    delegated = ask(
+        agent,
+        "WebTask: three errands on the web",
+        component="WebTask",
+        instruction="Three errands, and none of them is something I can do for you: each one needs "
+                    "a person on the other end.",
+        props=c.web_task(
+            [
+                c.web_task_item(
+                    "renew-insurance",
+                    "Renew the car insurance",
+                    "https://example.com/insurance/renew/8842",
+                    note="The quote is already at step three. Take the 12-month term, not the 6-month one.",
+                    done="a policy number is on the screen",
+                ),
+                c.web_task_item(
+                    "pay-invoice",
+                    "Pay the hosting invoice",
+                    "https://example.com/billing/invoices/2291",
+                    done="the invoice shows as paid",
+                ),
+                c.web_task_item(
+                    "book-slot",
+                    "Book the delivery slot",
+                    "https://example.com/deliveries/slots",
+                    done="a slot is confirmed",
+                    optional=True,
+                ),
+            ],
+            title="Three stops, in any order",
+            intro="Each row says what finished looks like, and every one has somewhere to write "
+                  "down what happened.",
+            return_files=True,
+            allow_skip=True,
+        ),
+    )
+    rows = (delegated.get("payload") or {}).get("tasks") or []
+    done_rows = [row.get("id") for row in rows if row.get("status") == "done"]
+    skipped_rows = [row.get("id") for row in rows if row.get("status") == "skipped"]
+    agent.note(
+        f"List back: {len(done_rows)} of {len(rows)} done"
+        + (f", skipped {', '.join(str(r) for r in skipped_rows)}" if skipped_rows else "")
+        + ".",
+        kind="result",
+    )
+    for row in rows:
+        if row.get("note"):
+            agent.note(f"  {row.get('id')}: {row.get('note')}", kind="meta")
+    print()
+
+    # 12. ESign ------------------------------------------------------------
+    # The provider shape: a signing page, opened in the embedded browser, with the finished file
+    # attached back. The other shape — an agent-supplied PDF filled and signed inside the canvas —
+    # is the same component with `document=` instead of `url=`.
+    signed = ask(
+        agent,
+        "ESign: the lease renewal",
+        component="ESign",
+        instruction="The lease renewal needs your signature before the end of the month. The "
+                    "provider is expecting you.",
+        props=c.esign(
+            # A real provider link is a long-lived URL issued by the provider's own portal; this
+            # one is a stand-in so the walkthrough needs no account anywhere.
+            url="https://example.com/lease-renewal/8821",
+            title="Residential lease renewal",
+            intro="The term is unchanged from last year. Sign it there, then attach the copy it "
+                  "gives you and I will file it with the rest.",
+            return_signed_copy=True,
+            submit_label="Send the signed copy",
+        ),
+    )
+    signed_payload = signed.get("payload") or {}
+    returned = signed_payload.get("document") or {}
+    agent.note(
+        "Signing confirmed"
+        + (f", with {returned.get('filename')} ({returned.get('size')} bytes) attached."
+           if returned else ", with no copy attached."),
+        kind="result",
+    )
+    print()
+
+    # 13. Notice -----------------------------------------------------------
     closed = ask(
         agent,
         "Notice success with a closing action",
@@ -416,6 +613,10 @@ def run(agent: Agent) -> None:
                 f"Drill-down: {region}",
                 f"Confidence: {confidence}/5 ({confidence_word})",
                 f"Patch: {len(accepted)} hunks accepted, {len(rejected)} rejected",
+                f"Marks on the dashboard: {len(shapes)} ({drawn})",
+                f"Routed {len(pairs)} failing runs to a team",
+                f"Verification budget: {sum(split.values())}/40 minutes across "
+                f"{len(split)} lines",
             ],
             actions=[c.option("done", "Close the loop", variant="primary")],
         ),
@@ -427,7 +628,6 @@ def run(agent: Agent) -> None:
     print(f"Closing action: {(closed.get('payload') or {}).get('actionId')}")
     print()
 
-    agent.notify("info", "Demo complete.")
     agent.note("Demo complete.", kind="result")
     print("Demo complete.")
 

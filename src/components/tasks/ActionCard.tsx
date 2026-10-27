@@ -12,8 +12,9 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { Badge, Button, toneClassesAt } from "@/components/ui";
+import { Badge, Button, KeyHint, toneClassesAt } from "@/components/ui";
 import type { TaskComponentProps } from "@/components/renderer/types";
+import { optionKeys, useOptionKeys } from "@/lib/keyboard";
 import type { ActionCardProps, ActionOption } from "@/lib/protocol";
 import { cn } from "@/lib/utils";
 
@@ -70,6 +71,9 @@ const GRID: Record<number, string> = {
  * three plain options reads as three different things at a glance. An option that *does*
  * name one is left alone: `primary` and `destructive` are already distinct by fill, and
  * tinting them by position would fight the meaning the agent chose on purpose.
+ *
+ * Each option also carries the number that picks it, so the whole question can be answered
+ * from the keyboard without finding the pointer first.
  */
 export default function ActionCard({
   props,
@@ -92,6 +96,15 @@ export default function ActionCard({
     if (active && active !== document.body) return;
     firstRef.current?.focus();
   }, [locked]);
+
+  const keys = useMemo(() => optionKeys(options.length), [options.length]);
+  useOptionKeys(() =>
+    options.map((option, index) => ({
+      key: keys[index] ?? "",
+      run: () => choose(option),
+      disabled: locked,
+    })),
+  );
 
   if (options.length === 0) {
     return (
@@ -172,6 +185,7 @@ export default function ActionCard({
                   </span>
                 ) : null}
               </span>
+              <KeyHint keys={keys[index]} />
               <ArrowRight
                 aria-hidden="true"
                 className={cn("opacity-40", semantic ? null : tone.glyph)}

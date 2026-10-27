@@ -8,8 +8,9 @@ import {
   ChevronsUpDown,
   Search,
 } from "lucide-react";
-import { Badge, Button, Input } from "@/components/ui";
+import { Badge, Button, Input, KeyHint } from "@/components/ui";
 import type { TaskComponentProps } from "@/components/renderer/types";
+import { optionKeys, useOptionKeys } from "@/lib/keyboard";
 import type { Column, DataGridProps, Row } from "@/lib/protocol";
 import { cn, formatNumber } from "@/lib/utils";
 
@@ -157,6 +158,18 @@ export default function DataGrid({
   // pressable until the agent's `resolve` comes back over the socket.
   const interactive = selectMode !== "none" && !resolved && !sent;
 
+  // Numbered rows, so picking one out of a page does not need the mouse. Only the rows on
+  // screen get a key: a number that refers to something further down the table would be a
+  // number the human cannot read off anything.
+  const rowKeys = useMemo(() => optionKeys(visible.length), [visible.length]);
+  useOptionKeys(() =>
+    visible.map((entry, index) => ({
+      key: rowKeys[index] ?? "",
+      run: () => toggleRow(entry.key),
+      disabled: !interactive,
+    })),
+  );
+
   const commitSelection = (nextIds: string[]) => {
     setSelected(nextIds);
     const rowsForIds = nextIds
@@ -227,7 +240,9 @@ export default function DataGrid({
     respond("submit", { component: "DataGrid", rowIds: ids, rows: rowsForIds });
   };
 
-  const columnCount = columns.length + (selectMode === "multi" ? 1 : 0);
+  // One leading cell for the row number, whenever the rows are pickable at all. A multi-select
+  // already had one for its tick buttons; a single-select gets one so it can show its keys.
+  const columnCount = columns.length + (selectMode === "none" ? 0 : 1);
   // `interactive` already means "selectable and still open", so the footer is needed when
   // either the rows overflow the page or a selection is still possible.
   const showFooter = sorted.length > effectivePageSize || interactive;
@@ -252,8 +267,11 @@ export default function DataGrid({
         <table className="w-full border-collapse text-left text-xs">
           <thead>
             <tr className="bg-secondary/40">
-              {selectMode === "multi" ? (
+              {selectMode !== "none" ? (
                 <th scope="col" className="w-11 px-2.5 py-2.5">
+                  {selectMode !== "multi" ? (
+                    <span className="sr-only">Row number</span>
+                  ) : (
                   <button
                     type="button"
                     onClick={toggleAllVisible}
@@ -275,6 +293,7 @@ export default function DataGrid({
                   >
                     <SelectionMark on={allVisibleSelected} />
                   </button>
+                  )}
                 </th>
               ) : null}
               {columns.map((column) => (
@@ -331,7 +350,7 @@ export default function DataGrid({
                 </td>
               </tr>
             ) : (
-              visible.map((entry) => {
+              visible.map((entry, rowIndex) => {
                 const isSelected = selectedSet.has(entry.key);
                 return (
                   <tr
@@ -343,6 +362,17 @@ export default function DataGrid({
                     tabIndex={interactive ? 0 : undefined}
                     onKeyDown={(event) => {
                       if (!interactive) return;
+                      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+                        // Walk the rows the human can actually see, so a long table is
+                        // navigable without tabbing through every cell in it.
+                        event.preventDefault();
+                        const body = event.currentTarget.closest("tbody");
+                        if (!body) return;
+                        const rows = Array.from(body.querySelectorAll<HTMLElement>("tr"));
+                        const at = rows.indexOf(event.currentTarget);
+                        rows[at + (event.key === "ArrowDown" ? 1 : -1)]?.focus();
+                        return;
+                      }
                       if (event.key !== "Enter" && event.key !== " ") return;
                       event.preventDefault();
                       toggleRow(entry.key);
@@ -354,10 +384,13 @@ export default function DataGrid({
                       isSelected && "bg-primary/10",
                     )}
                   >
-                    {selectMode === "multi" ? (
+                    {selectMode !== "none" ? (
                       // The row itself is clickable, so the toggle stops the click from
                       // reaching it — otherwise one press would select and then deselect.
-                      <td className="px-2.5 py-2.5" onClick={(event) => event.stopPropagation()}>
+                      <td className="w-11 px-2.5 py-2.5" onClick={(event) => event.stopPropagation()}>
+                        {selectMode !== "multi" ? (
+                          <KeyHint keys={rowKeys[rowIndex]} />
+                        ) : (
                         <button
                           type="button"
                           onClick={() => toggleRow(entry.key)}
@@ -375,6 +408,7 @@ export default function DataGrid({
                         >
                           <SelectionMark on={isSelected} />
                         </button>
+                        )}
                       </td>
                     ) : null}
                     {columns.map((column) => (
@@ -444,7 +478,7 @@ export default function DataGrid({
         </p>
       ) : selectMode === "single" ? (
         <p className="text-[11px] text-muted-foreground">
-          Press the row you mean. That press is the answer.
+          Press the row you mean, or type its number. That press is the answer.
         </p>
       ) : interactive ? (
         <div className="flex justify-end">

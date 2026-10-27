@@ -27,10 +27,12 @@ use tokio_tungstenite::tungstenite::Message;
 use uuid::Uuid;
 
 use crate::protocol::{
-    is_known_component, validate_props, AckFrame, AckStatus, AgentConnection, AgentFrame,
-    AgentIdentity, BridgeStatus, CanvasFrame, ErrorCode, ErrorFrame, EventFrame, EventName,
-    PongFrame, ServerInfo, WelcomeFrame, COMPONENT_NAMES, PROTOCOL_VERSION, SERVER_NAME,
-    SERVER_VERSION,
+    expand_run, is_known_component, validate_props, AckFrame, AckStatus, AgentConnection,
+    AgentFrame, AgentIdentity, AnswersFrame, BridgeStatus, CanvasFrame, ErrorCode, ErrorFrame,
+    EventFrame, EventName, PongFrame, ProgressFrame, RetainedAnswer, ServerInfo, Signal, TaskFrame,
+    WaitPlan, WaitState, WelcomeFrame, COMPONENT_NAMES, DEFAULT_POLL_INTERVAL_MS,
+    DEFAULT_WAIT_ESTIMATE_MS, PROTOCOL_VERSION, RETAINED_ANSWER_LIMIT, RETAINED_ANSWER_TTL_MS,
+    SERVER_NAME, SERVER_VERSION,
 };
 
 /// Default pending-queue depth. A queue exists because the bridge can accept tasks before
@@ -39,9 +41,30 @@ pub const DEFAULT_PENDING_CAPACITY: usize = 32;
 
 /// Frame types an agent is allowed to send. Used to distinguish "unknown frame type" from
 /// "known type, broken body" so the error code is precise.
-const KNOWN_FRAME_TYPES: [&str; 7] = [
-    "hello", "task", "update", "resolve", "notify", "note", "ping",
+const KNOWN_FRAME_TYPES: [&str; 8] = [
+    "hello",
+    "task",
+    "run",
+    "update",
+    "resolve",
+    "note",
+    "ping",
+    "answers",
 ];
+
+/// The window the bridge quotes to an agent on the ack for a `task`.
+///
+/// Read once per call rather than cached in a static, so a test (or a host that has measured
+/// its own humans) can set it. Anything unparseable falls back to the documented default
+/// instead of failing the task: this is an estimate, and a wrong estimate must never cost
+/// somebody their question.
+fn wait_estimate_ms() -> u64 {
+    std::env::var("AURAUI_WAIT_ESTIMATE_MS")
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_WAIT_ESTIMATE_MS)
+}
 
 /* ------------------------------------------------------------------ *
  * Logging
@@ -225,6 +248,9 @@ struct Inner {
     /// Task ids the human's surface has actually been shown. Drives the ack status of
     /// `update` and `resolve`: you cannot update a card that was never painted.
     known_tasks: Mutex<HashSet<String>>,
+    /// Terminal events kept so an agent that stopped waiting can still collect the answer.
+    /// Newest first, bounded by `RETAINED_ANSWER_LIMIT` and `RETAINED_ANSWER_TTL_MS`.
+    answers: Mutex<VecDeque<RetainedAnswer>>,
     /// Frames accepted while nothing was listening.
     pending: Mutex<VecDeque<AgentFrame>>,
     pending_capacity: usize,
@@ -270,6 +296,7 @@ impl Bridge {
             sink: config.sink,
             conns: Mutex::new(HashMap::new()),
             known_tasks: Mutex::new(HashSet::new()),
+            answers: Mutex::new(VecDeque::new()),
             pending: Mutex::new(VecDeque::new()),
             pending_capacity: config.pending_capacity.max(1),
             seq: AtomicU64::new(0),
@@ -404,8 +431,83 @@ impl BridgeHandle {
             at: now_ms(),
         };
         self.inner.emitted.fetch_add(1, Ordering::SeqCst);
+
+        // Keep the answer before broadcasting it. The agent that is waiting right now gets it
+        // either way; the one that gave up and asks later only gets it because of this line.
+        if event.is_terminal() {
+            self.retain_answer(&frame);
+        }
+
         self.broadcast_canvas(CanvasFrame::Event(frame.clone()));
         frame
+    }
+
+    /// Check in on a question nobody has answered yet.
+    ///
+    /// Called by the canvas on a timer while a card is up, and immediately whenever the human
+    /// does something on it. The frame carries the partial answer, so an agent can act on a
+    /// half-finished form rather than only learning about it at the end.
+    pub fn emit_progress(
+        &self,
+        task_id: &str,
+        state: WaitState,
+        elapsed_ms: u64,
+        signals: Vec<Signal>,
+    ) -> ProgressFrame {
+        let estimated_ms = wait_estimate_ms();
+        let frame = ProgressFrame {
+            v: PROTOCOL_VERSION.to_string(),
+            task_id: task_id.to_string(),
+            state,
+            elapsed_ms,
+            estimated_ms,
+            // Saturating rather than negative: a wait that has outlasted the estimate is
+            // still a wait, and the frame keeps saying so.
+            remaining_ms: estimated_ms.saturating_sub(elapsed_ms),
+            signals,
+            at: now_ms(),
+        };
+        self.inner.emitted.fetch_add(1, Ordering::SeqCst);
+        self.broadcast_canvas(CanvasFrame::Progress(frame.clone()));
+        frame
+    }
+
+    /// Everything the bridge still remembers being answered, newest first.
+    pub fn answers(&self, task_ids: Option<&[String]>) -> Vec<RetainedAnswer> {
+        let now = now_ms();
+        let mut kept = lock(&self.inner.answers);
+        // Expiry is enforced on read as well as on write: nothing polls this map, so a stale
+        // entry would otherwise sit there until the next answer arrived.
+        kept.retain(|answer| now.saturating_sub(answer.at) < RETAINED_ANSWER_TTL_MS);
+        kept.iter()
+            .filter(|answer| match task_ids {
+                Some(ids) => ids.iter().any(|id| id == &answer.task_id),
+                None => true,
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Keep one terminal event, replacing any earlier answer for the same task.
+    ///
+    /// Replacing rather than appending matters: a card can be answered, re-sent by an agent
+    /// that did not see the answer, and answered again, and the agent asking later wants the
+    /// thing the human said last, not both.
+    fn retain_answer(&self, frame: &EventFrame) {
+        let entry = RetainedAnswer {
+            task_id: frame.task_id.clone(),
+            event: frame.event,
+            payload: frame.payload.clone(),
+            seq: frame.seq,
+            at: frame.at,
+        };
+        let now = now_ms();
+        let mut kept = lock(&self.inner.answers);
+        kept.retain(|answer| {
+            answer.task_id != entry.task_id && now.saturating_sub(answer.at) < RETAINED_ANSWER_TTL_MS
+        });
+        kept.push_front(entry);
+        kept.truncate(RETAINED_ANSWER_LIMIT);
     }
 
     /// Send any frame to every connected agent.
@@ -569,40 +671,35 @@ impl BridgeHandle {
             }
 
             AgentFrame::Task(task) => {
-                if !is_known_component(&task.component) {
-                    self.send_error(
-                        conn_id,
-                        ErrorCode::UnknownComponent,
-                        format!(
-                            "Unknown component {:?}. Supported: {}.",
-                            task.component,
-                            COMPONENT_NAMES.join(", ")
-                        ),
-                        Some(task.task_id.clone()),
-                    );
-                    return;
-                }
-                if let Err(message) = validate_props(&task.component, &task.props) {
-                    self.send_error(conn_id, ErrorCode::BadFrame, message, Some(task.task_id.clone()));
-                    return;
-                }
+                self.accept_task(conn_id, task);
+            }
 
-                let delivery = self.inner.sink.deliver(&frame);
-                match delivery {
-                    Delivery::Attached => {
-                        lock(&self.inner.known_tasks).insert(task.task_id.clone());
-                        self.send_ack(&task.task_id, AckStatus::Rendered);
+            AgentFrame::Run(run) => {
+                // Expanded before anything is delivered. A rejected run therefore sends
+                // *nothing*: an agent that batched six questions with a typo in the fourth
+                // gets one error naming that question, not five cards and a mystery.
+                let tasks = match expand_run(run) {
+                    Ok(tasks) => tasks,
+                    Err(refusal) => {
+                        warn(format!("run {} refused: {}", run.run_id, refusal.message));
+                        let code = if refusal.message.starts_with("Unknown component") {
+                            ErrorCode::UnknownComponent
+                        } else {
+                            ErrorCode::BadFrame
+                        };
+                        self.send_error(conn_id, code, refusal.message, refusal.question_id);
+                        return;
                     }
-                    Delivery::Queued => {
-                        let task_id = task.task_id.clone();
-                        self.push_pending(frame.clone());
-                        self.send_ack(&task_id, ack_status_for(delivery));
-                    }
-                }
+                };
+
                 log(format!(
-                    "task {} [{}] -> {delivery:?}",
-                    task.task_id, task.component
+                    "run {} -> {} question(s)",
+                    run.run_id,
+                    tasks.len()
                 ));
+                for task in &tasks {
+                    self.accept_task(conn_id, task);
+                }
             }
 
             AgentFrame::Update(update) => {
@@ -625,6 +722,7 @@ impl BridgeHandle {
                     } else {
                         AckStatus::Unknown
                     },
+                    None,
                 );
             }
 
@@ -639,12 +737,8 @@ impl BridgeHandle {
                     } else {
                         AckStatus::Unknown
                     },
+                    None,
                 );
-            }
-
-            AgentFrame::Notify(notify) => {
-                self.inner.sink.deliver(&frame);
-                log(format!("notify {:?} {}", notify.level, notify.message));
             }
 
             AgentFrame::Note(note) => {
@@ -660,16 +754,106 @@ impl BridgeHandle {
                     }),
                 );
             }
+
+            AgentFrame::Answers(request) => {
+                // Answered to the asker alone, unlike an ack: this is a read of session state
+                // by one agent, and broadcasting it would spam every other agent with a list
+                // of questions it did not ask about.
+                let task_ids = request.task_ids.as_deref();
+                let items = self.answers(task_ids);
+                log(format!(
+                    "answers: {} retained for {}",
+                    items.len(),
+                    match task_ids {
+                        Some(ids) => format!("{} task id(s)", ids.len()),
+                        None => "everything".to_string(),
+                    }
+                ));
+                self.send_to(
+                    conn_id,
+                    CanvasFrame::Answers(AnswersFrame {
+                        v: PROTOCOL_VERSION.to_string(),
+                        items,
+                    }),
+                );
+            }
+        }
+    }
+
+    /// Validate, deliver and acknowledge one question.
+    ///
+    /// Shared by `task` and by every question of a `run`, which is what keeps the batching
+    /// honest: a question inside a run is accepted, acked and reported under exactly the rules
+    /// a lone one is, and nothing downstream can tell the two apart except its `run` slot.
+    fn accept_task(&self, conn_id: &str, task: &TaskFrame) {
+        if !is_known_component(&task.component) {
+            self.send_error(
+                conn_id,
+                ErrorCode::UnknownComponent,
+                format!(
+                    "Unknown component {:?}. Supported: {}.",
+                    task.component,
+                    COMPONENT_NAMES.join(", ")
+                ),
+                Some(task.task_id.clone()),
+            );
+            return;
+        }
+        if let Err(message) = validate_props(&task.component, &task.props) {
+            self.send_error(conn_id, ErrorCode::BadFrame, message, Some(task.task_id.clone()));
+            return;
+        }
+
+        let frame = AgentFrame::Task(task.clone());
+        let delivery = self.inner.sink.deliver(&frame);
+        // The wait plan rides on the ack for a question and nowhere else: this is the frame an
+        // agent is expected to block on, so it is the one that deserves "expect about this
+        // long, and here is how often I will check in".
+        let plan = self.wait_plan();
+        match delivery {
+            Delivery::Attached => {
+                lock(&self.inner.known_tasks).insert(task.task_id.clone());
+                self.send_ack(&task.task_id, AckStatus::Rendered, Some(plan));
+            }
+            Delivery::Queued => {
+                self.push_pending(frame.clone());
+                self.send_ack(&task.task_id, ack_status_for(delivery), Some(plan));
+            }
+        }
+        match &task.run {
+            Some(slot) => log(format!(
+                "task {} [{}] (run {} {}/{}) -> {delivery:?}",
+                task.task_id,
+                task.component,
+                slot.run_id,
+                slot.index + 1,
+                slot.total
+            )),
+            None => log(format!(
+                "task {} [{}] -> {delivery:?}",
+                task.task_id, task.component
+            )),
+        }
+    }
+
+    /// The wait plan quoted on the ack for a `task`.
+    fn wait_plan(&self) -> WaitPlan {
+        let estimated_ms = wait_estimate_ms();
+        WaitPlan {
+            estimated_ms,
+            poll_interval_ms: DEFAULT_POLL_INTERVAL_MS,
+            expires_at: now_ms().saturating_add(estimated_ms),
         }
     }
 
     /// Acks are broadcast to every connected agent, not just the sender: a session is shared
     /// state, and the broadcast keeps all agents' views of what the human has seen in step.
-    fn send_ack(&self, task_id: &str, status: AckStatus) {
+    fn send_ack(&self, task_id: &str, status: AckStatus, wait: Option<WaitPlan>) {
         self.broadcast_canvas(CanvasFrame::Ack(AckFrame {
             v: PROTOCOL_VERSION.to_string(),
             task_id: task_id.to_string(),
             status,
+            wait,
         }));
     }
 
@@ -822,10 +1006,18 @@ fn describe_frame(frame: &AgentFrame) -> String {
         AgentFrame::Task(t) => format!("task {} [{}]", t.task_id, t.component),
         AgentFrame::Update(u) => format!("update {}", u.task_id),
         AgentFrame::Resolve(r) => format!("resolve {}", r.task_id),
-        AgentFrame::Notify(_) => "notify".to_string(),
         AgentFrame::Note(_) => "note".to_string(),
         AgentFrame::Hello(h) => format!("hello {}", h.agent.name),
         AgentFrame::Ping(_) => "ping".to_string(),
+        AgentFrame::Answers(request) => match &request.task_ids {
+            Some(ids) => format!("answers ({} task id(s))", ids.len()),
+            None => "answers (everything retained)".to_string(),
+        },
+        AgentFrame::Run(run) => format!(
+            "run {} ({} question(s))",
+            run.run_id,
+            run.questions.len()
+        ),
     }
 }
 

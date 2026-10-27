@@ -19,7 +19,9 @@ AuraUI is not a window you keep open, and not a chat log. It is an overlay:
 - A question **fades up over the whole desktop**, dimming what you were looking at but
   leaving it visible, and the card is the only thing asking for your attention.
 - **One question at a time.** Everything else the agent asks waits in a queue, shown as a
-  single quiet line, and is answered in the order it was asked.
+  single quiet line, and is answered in the order it was asked. Questions the agent already
+  knew it needed arrive as one `run`, so four cards read as one ask — "Question 2 of 4" —
+  while each is still answered by a single press.
 - **One press answers it.** A choice, a row in a table, a point on a scale and an
   accept-or-reject on a diff are all sent by the press that makes them. Only a question that
   genuinely needs words keeps a button, because only you know when you have finished typing.
@@ -38,7 +40,7 @@ part of answering the question in front of you, it is not there.
 
 ## What v1 does
 
-Eight component kinds, all verified end to end:
+Thirteen component kinds, all verified end to end:
 
 | Component | The question it asks | Event back |
 | --- | --- | --- |
@@ -50,17 +52,34 @@ Eight component kinds, all verified end to end:
 | `InteractiveChart` | Click a bar to drill into the real data | `filter` |
 | `RatingScale` | Press a point on a bounded scale | `submit` |
 | `DiffReview` | Accept or reject each hunk of a change | `submit` |
+| `RegionMark` | Draw on the picture you were sent: boxes, circles, arrows, Xs, freehand | `submit` |
+| `PairMatrix` | Send each item to the option it belongs to | `submit` |
+| `AllocateBudget` | Split a total across lines, and make it add up | `submit` |
+| `WebTask` | Go and do this — one page, or a list of them | `submit` |
+| `ESign` | Read this and sign it | `submit` |
 
 Choosing is always a button. There is deliberately no checkbox, radio button or dropdown
 anywhere in the canvas, and the bridge refuses a chart spec that would draw one.
 
 And choosing is *one* button. The press that makes a choice is the answer — `ActionCard`,
-`Notice` with actions, a single-select `DataGrid`, a `RatingScale` point and a single-hunk
-`DiffReview` all send themselves on that press. A button asking you to confirm the thing you
+`Notice` with actions, a single-select `DataGrid`, a `RatingScale` point, a single-hunk
+`DiffReview` and the last open row of a `PairMatrix` all send themselves on that press. A
+drawing and a split of a total keep a button, because a mark and an arithmetic are the two
+things here that are easier to get wrong than to say. A button asking you to confirm the thing you
 just clicked turns one decision into two, so there is not one.
 
-Plus `note` for narration, `notify` for toasts, and `ack` so an agent always knows whether a
-window is actually showing its question (`rendered`) or nobody is looking (`queued`).
+The two components that hand work *over* instead of asking about it — `WebTask` and `ESign` —
+keep a button, for the opposite reason: a page watched until it says done is a job you come back
+from, and the moment you come back is yours to pick. `WebTask` takes one URL or a list of them,
+each with the agent's own sentence for what finished looks like, and sends per-item progress as it
+goes so an agent waiting on a long list knows where the books stand. `ESign` takes a provider link
+or a PDF the agent supplies, renders it in the card, and hands back the signed bytes. Both can
+carry a session — cookies and per-origin storage — into an embedded browser so the human resumes
+mid-flow instead of logging in again. [WEBTASK-SESSION.md](docs/WEBTASK-SESSION.md) argues for the
+embedded browser and says plainly what a passed session can and cannot do.
+
+Plus `note` for narration and `ack` so an agent always knows whether a window is actually
+showing its question (`rendered`) or nobody is looking (`queued`).
 
 ### Answering out loud
 
@@ -113,7 +132,7 @@ python3 examples/demo_agent.py     # standard library only, nothing to install
 node examples/demo-agent.mjs       # uses the optional `ws` package (already installed)
 ```
 
-Both scripts walk the human through all eight components and print every exchange. Each
+Both scripts walk the human through all thirteen components and print every exchange. Each
 card asks one question, so the incident report is a short interview and the patch is
 reviewed one hunk at a time.
 
@@ -139,6 +158,12 @@ with Agent("release-wrangler") as agent:
     )
     print(answer["payload"]["actionId"])   # "investigate"
 ```
+
+`task()` blocks, which is what a tool call does. What it also has to survive is a person: the
+ack quotes how long an answer usually takes, `progress` frames say whether anyone has touched
+the card and carry their partial answer as they make it, and an answer the bridge kept is still
+collectable after a deadline has passed (`wait_for`, `answers`). `docs/PROTOCOL.md` §8 explains
+the model, alongside how MCP's Tasks and Multi Round-Trip Requests solve the same problem.
 
 Node, zero required dependencies:
 
@@ -175,17 +200,49 @@ The full frame reference, every prop shape and the error codes are in
 | `clients/python/` | `auraui` — stdlib-only client, including a from-scratch RFC 6455 codec |
 | `clients/ts/` | `auraui-client` — plain ESM, hand-written types, no build step |
 | `examples/` | The same demo, one question per card, in both languages |
+| `pwa/` | The phone app: its own shell, service worker and manifest, over the same components |
 | `docs/PROTOCOL.md` | The wire contract. Read this before writing an agent. |
-| `docs/REMOTE-AND-MOBILE.md` | Design note: reaching a phone, and what PeerJS would cost |
+| `docs/PWA-REMOTE.md` | Design note: pairing, the peer link, and waking a sleeping phone |
+| `docs/WEBTASK-SESSION.md` | Design note: the embedded browser, passed sessions, and their limits |
+| `docs/REMOTE-AND-MOBILE.md` | Earlier design note: how the phone options were weighed |
 
 The contract lives in three places that must agree: `docs/PROTOCOL.md`,
 `src/lib/protocol.ts` and `src-tauri/src/protocol.rs`.
+
+## The phone
+
+The canvas is not only an overlay. The same thirteen components, the same protocol and the same
+registry also build into an installable phone app, so a question that arrives while the human is
+away from their desk is answered from a pocket instead of waiting. The two that need an embedded
+browser degrade there instead of failing: the same queue, the same notes, and every link opens in
+the phone's own browser, which is the one browser it already has a session in.
+
+The desktop draws a QR code; the phone scans it once with the camera; from then on that phone is
+paired. The code carries the desktop's peer id, a shared secret, and the desktop's push key, so
+there is nothing to type and no account anywhere. The question travels over a WebRTC data channel
+directly between the two machines, and the desktop stays the gate: it validates every frame before
+the phone ever sees it, exactly as it does for its own window.
+
+When the phone is asleep, the desktop sends it a push. That is the only part of the path a third
+party is involved in at all — and it is a blind relay, because the desktop signs and encrypts the
+payload itself. The notification wakes the phone's service worker, which shows one notification;
+tapping it opens the app, which dials the desktop back.
+
+The phone build is published from `dist-pwa` to GitHub Pages by
+[.github/workflows/pages.yml](.github/workflows/pages.yml). It has to live on a real HTTPS origin
+— a service worker and the Push API do not exist in a page served over a LAN address — which is
+the whole reason it is not served out of the desktop binary.
+
+[PWA-REMOTE.md](docs/PWA-REMOTE.md) is the design note, including the correction to the
+architecture it started from: a browser cannot send a push, so the sender is the desktop.
 
 ## Tests and checks
 
 ```bash
 npm run typecheck      # TypeScript, strict
 npm run build          # typecheck + production canvas bundle
+npm run build:pwa      # typecheck + the installable phone bundle the Pages workflow publishes
+npm run dev:pwa        # the phone app in a browser, with a scripted agent
 npm run test:rust      # protocol unit tests + real-socket bridge integration tests
 ```
 
@@ -202,9 +259,18 @@ python3 examples/demo_agent.py --once --step-timeout 20
 
 ## Not in v1
 
-The PRD's Milestone 3 — commanding a webview, recording user workflows as DOM telemetry, and
-tldraw snapshot redlining — is not built. Those need a real Tauri window and native capture,
-and they are the next milestone rather than a stub. Mobile parity (Milestone 4) is untouched.
+The PRD's Milestone 3 asked for commanding a webview, recording user workflows as DOM telemetry,
+and tldraw snapshot redlining. The first of those is now half built, in the narrowest form that
+was useful: an embedded webview the *human* drives, opened by the agent and closed when they send
+their answer. Nothing in the canvas clicks, types or submits inside it, no page content is read
+back out, and no workflow is recorded. Driving the view from the agent side, DOM telemetry and
+tldraw redlining remain the rest of that milestone rather than a stub.
+
+The phone app exists and is paired by hand, but the desktop half of the pairing is not wired up
+yet: it cannot yet draw the QR, does not persist its peer identity or push keys, cannot send a
+push, and does not relay frames over the link. Until it does, a phone only works while the app is
+open. The four pieces are one milestone and are listed in
+[PWA-REMOTE.md](docs/PWA-REMOTE.md) §6.
 
 ## Security
 
@@ -212,6 +278,21 @@ The bridge is **loopback only** and has no authentication: anything that can ope
 `127.0.0.1:9090` on this machine can put a card in front of the human. That is local-machine
 trust, the same as a terminal. The canvas renders declarative props only — agents cannot
 inject HTML, CSS or JavaScript.
+
+`WebTask` and `ESign` add one surface that is not declarative: an embedded browser showing a site
+the agent named. Two things hold the line there. The app's IPC is locked to the canvas webview by
+label — in the capability file and again in every command's caller check — so a page inside the
+app can reach neither the bridge nor the shell's commands. And a session is only ever injected
+after the human is told, per origin, which site is asking and how much of their sign-in comes with
+it. What that does and does not protect against is set out in
+[WEBTASK-SESSION.md](docs/WEBTASK-SESSION.md); the short version is that the human's judgement
+about the site is still the load-bearing part, so the card shows the host in its own pixels.
+
+A paired phone is a second door, and it is locked differently. It presents a 128-bit token from
+the QR, compared without an early exit; a socket that does not present it within ten seconds is
+closed; and a guest that does present it can only answer questions the desktop already accepted,
+because the validator stays on the desktop side of the link. The pairing payload travels in a URL
+fragment, which browsers never send to a server.
 
 ## License
 

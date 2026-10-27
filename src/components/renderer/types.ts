@@ -36,10 +36,18 @@ export type TaskComponent = ComponentType<TaskComponentProps<never>>;
 /** Registry entry: how to draw a component and how to describe it. */
 export interface TaskRenderer {
   component: TaskComponent;
-  /** Short label for the card header chip and toasts. */
+  /** Short label for the card header chip. */
   label: string;
   /** One-line hint shown when a task is the only thing on the canvas. */
   hint?: string;
+  /**
+   * Wants the card to take the wide column rather than the conversation-sized one.
+   *
+   * The canvas is built around a card the width of a question, and every component so far fits
+   * that. A delegated web task and a signature request do not: one shows a real page and the other
+   * shows a document, and neither can be read three hundred pixels at a time.
+   */
+  wide?: boolean;
 }
 
 export type RendererRegistry = Record<ComponentName, TaskRenderer>;

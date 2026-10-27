@@ -1,7 +1,8 @@
 import { useMemo, useState } from "react";
 import { Check, X } from "lucide-react";
-import { Button } from "@/components/ui";
+import { Button, KeyHint } from "@/components/ui";
 import type { TaskComponentProps } from "@/components/renderer/types";
+import { optionKeys, useOptionKeys } from "@/lib/keyboard";
 import type { DiffHunk, DiffLine, DiffReviewProps } from "@/lib/protocol";
 import { cn } from "@/lib/utils";
 
@@ -75,6 +76,17 @@ export default function DiffReview({
   const [sent, setSent] = useState<Record<string, Decision> | null>(null);
   const locked = resolved || sent !== null;
 
+  // Accept and Reject are the whole answer, so both get a key. They are numbered across the
+  // hunks in the order they are drawn, which for the one-hunk card this is meant to be is
+  // simply 1 and 2.
+  const keys = useMemo(() => optionKeys(hunks.length * 2), [hunks.length]);
+  useOptionKeys(() =>
+    hunks.flatMap((hunk, index) => [
+      { key: keys[index * 2] ?? "", run: () => decide(hunk.id, "accept"), disabled: locked },
+      { key: keys[index * 2 + 1] ?? "", run: () => decide(hunk.id, "reject"), disabled: locked },
+    ]),
+  );
+
   if (hunks.length === 0) {
     return (
       <p className="text-xs text-muted-foreground">
@@ -123,7 +135,7 @@ export default function DiffReview({
       ) : null}
 
       <ol className="flex flex-col gap-3">
-        {hunks.map((hunk) => {
+        {hunks.map((hunk, hunkIndex) => {
           const decision = decisions[hunk.id];
           const lines = Array.isArray(hunk.lines) ? hunk.lines : [];
           return (
@@ -146,6 +158,7 @@ export default function DiffReview({
                   >
                     <Check aria-hidden="true" />
                     Accept
+                    <KeyHint keys={keys[hunkIndex * 2]} />
                   </Button>
                   <Button
                     size="sm"
@@ -156,6 +169,7 @@ export default function DiffReview({
                   >
                     <X aria-hidden="true" />
                     Reject
+                    <KeyHint keys={keys[hunkIndex * 2 + 1]} />
                   </Button>
                 </div>
               </div>

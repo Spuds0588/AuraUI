@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use auraui_lib::bridge::{Bridge, BridgeConfig, BridgeError, BridgeHandle, Delivery, UiSink};
-use auraui_lib::protocol::{AgentFrame, BridgeStatus, EventName};
+use auraui_lib::protocol::{AgentFrame, BridgeStatus, EventName, Signal, WaitState};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
@@ -580,8 +580,675 @@ async fn tasks_wait_in_the_queue_while_nothing_is_attached() {
 }
 
 /* ------------------------------------------------------------------ *
+ * Waiting on a person
+ * ------------------------------------------------------------------ */
+
+/// The three frames that make a question survivable by an agent: the wait is quoted when the
+/// call is accepted, the wait is reported while it lasts, and the answer is kept after it.
+#[tokio::test]
+async fn a_task_quotes_its_wait_and_keeps_its_answer() {
+    let sink = Arc::new(TestSink::new(Delivery::Attached));
+    let handle = start_bridge(sink.clone()).await;
+    let mut ws = connect(&handle).await;
+    assert_eq!(recv_json(&mut ws).await["type"].as_str(), Some("welcome"));
+
+    send_json(
+        &mut ws,
+        json!({
+            "type": "task",
+            "taskId": "triage",
+            "component": "ActionCard",
+            "props": { "options": [{ "id": "investigate", "label": "Investigate" }] },
+        }),
+    )
+    .await;
+
+    // The confirmation half: the call is accepted, and it comes with an expectation.
+    let ack = recv_json(&mut ws).await;
+    assert_eq!(ack["type"].as_str(), Some("ack"));
+    assert_eq!(ack["status"].as_str(), Some("rendered"));
+    let estimated = ack["wait"]["estimatedMs"].as_u64().expect("a wait estimate");
+    let poll = ack["wait"]["pollIntervalMs"].as_u64().expect("a poll interval");
+    let expires = ack["wait"]["expiresAt"].as_u64().expect("an expiry instant");
+    assert!(estimated > 0 && poll > 0, "both numbers must be usable: {ack}");
+    assert!(
+        expires >= now_ms() + estimated - 1_000,
+        "expiry should be the estimate from now, not from the epoch: {ack}"
+    );
+
+    // A check-in while nobody has answered it, which is what the canvas sends on that
+    // interval and whenever the human touches the card.
+    let sent = handle.emit_progress(
+        "triage",
+        WaitState::Answering,
+        12_500,
+        vec![Signal {
+            event: EventName::Select,
+            payload: json!({ "rowIds": ["smoke-8843"] }),
+            at: now_ms(),
+        }],
+    );
+    assert_eq!(sent.state, WaitState::Answering);
+    assert_eq!(sent.remaining_ms, estimated - 12_500);
+
+    let progress = recv_json(&mut ws).await;
+    assert_eq!(progress["type"].as_str(), Some("progress"));
+    assert_eq!(progress["taskId"].as_str(), Some("triage"));
+    assert_eq!(progress["state"].as_str(), Some("answering"));
+    assert_eq!(progress["elapsedMs"].as_u64(), Some(12_500));
+    assert_eq!(
+        progress["signals"][0]["event"].as_str(),
+        Some("select"),
+        "a partial answer rides along with the check-in: {progress}"
+    );
+
+    // A wait that outlasts the estimate stays a wait: the number saturates rather than
+    // going negative, and nothing times the question out.
+    let late = handle.emit_progress("triage", WaitState::Waiting, estimated + 5_000, vec![]);
+    assert_eq!(late.remaining_ms, 0, "remaining time must not go negative");
+    let _ = recv_json(&mut ws).await;
+
+    // The human answers.
+    handle.emit_event("triage", EventName::Action, json!({ "actionId": "investigate" }));
+    let event = recv_json(&mut ws).await;
+    assert_eq!(event["type"].as_str(), Some("event"));
+    assert_eq!(event["event"].as_str(), Some("action"));
+
+    // An agent that was not waiting when it landed — a restarted one, or one whose own
+    // deadline passed — asks for the answer instead of asking the person twice.
+    let mut late_agent = connect(&handle).await;
+    assert_eq!(recv_json(&mut late_agent).await["type"].as_str(), Some("welcome"));
+
+    send_json(
+        &mut late_agent,
+        json!({ "type": "answers", "taskIds": ["triage"] }),
+    )
+    .await;
+    let answers = recv_json(&mut late_agent).await;
+    assert_eq!(answers["type"].as_str(), Some("answers"));
+    assert_eq!(answers["items"][0]["taskId"].as_str(), Some("triage"));
+    assert_eq!(answers["items"][0]["event"].as_str(), Some("action"));
+    assert_eq!(answers["items"][0]["payload"]["actionId"].as_str(), Some("investigate"));
+    assert_eq!(
+        answers["items"][0]["seq"].as_u64(),
+        event["seq"].as_u64(),
+        "a retained answer is the same event, not a copy: {answers}"
+    );
+
+    // Asking for everything kept is the same answer, and a question nobody answered has
+    // nothing to hand back.
+    send_json(&mut late_agent, json!({ "type": "answers" })).await;
+    let everything = recv_json(&mut late_agent).await;
+    assert_eq!(everything["items"].as_array().map(Vec::len), Some(1));
+
+    send_json(
+        &mut late_agent,
+        json!({ "type": "answers", "taskIds": ["never-asked"] }),
+    )
+    .await;
+    assert_eq!(
+        recv_json(&mut late_agent).await["items"].as_array().map(Vec::len),
+        Some(0),
+        "a task nobody answered must not be invented from the retention list"
+    );
+
+    handle.shutdown();
+}
+
+/* ------------------------------------------------------------------ *
+ * Asking several questions in one call
+ * ------------------------------------------------------------------ */
+
+/// A run is one request and several questions: each question is acked and delivered as if it
+/// had been asked alone, carrying only enough context for the card to place it in the set.
+#[tokio::test]
+async fn a_run_becomes_ordered_questions_with_one_answer_each() {
+    let sink = Arc::new(TestSink::new(Delivery::Attached));
+    let mut delivered = sink.subscribe();
+    let handle = start_bridge(sink.clone()).await;
+    let mut ws = connect(&handle).await;
+    assert_eq!(recv_json(&mut ws).await["type"].as_str(), Some("welcome"));
+
+    send_json(
+        &mut ws,
+        json!({
+            "type": "run",
+            "runId": "incident",
+            "instruction": "Three things about the incident.",
+            "questions": [
+                {"id":"area","component":"ActionCard","instruction":"Where did it break?",
+                 "props":{"options":[{"id":"checkout","label":"Checkout"}]}},
+                {"id":"severity","component":"RatingScale","props":{"max":5}},
+                {"id":"patch","component":"DiffReview",
+                 "props":{"hunks":[{"id":"h1","lines":[{"kind":"add","text":"+x"}]}]}},
+            ],
+        }),
+    )
+    .await;
+
+    // Each question is acknowledged on its own id, with the same wait plan a lone task gets.
+    for expected in ["area", "severity", "patch"] {
+        let ack = recv_json(&mut ws).await;
+        assert_eq!(ack["type"].as_str(), Some("ack"));
+        assert_eq!(ack["taskId"].as_str(), Some(expected), "acks must name the question: {ack}");
+        assert_eq!(ack["status"].as_str(), Some("rendered"));
+        assert!(ack["wait"]["estimatedMs"].as_u64().unwrap_or(0) > 0);
+    }
+
+    // The surface receives one ordinary task per question, in the order they were written.
+    let mut seen = Vec::new();
+    for _ in 0..3 {
+        let frame = delivered
+            .recv()
+            .await
+            .expect("the surface should receive every question of the run");
+        match frame {
+            AgentFrame::Task(task) => seen.push(task),
+            other => panic!("a run must reach the surface as tasks, got {other:?}"),
+        }
+    }
+    assert_eq!(
+        seen.iter().map(|task| task.task_id.as_str()).collect::<Vec<_>>(),
+        vec!["area", "severity", "patch"],
+        "a run is asked in the order it was written"
+    );
+    let slot = seen[1].run.as_ref().expect("the second question knows its slot");
+    assert_eq!(slot.run_id, "incident");
+    assert_eq!((slot.index, slot.total), (1, 3));
+    assert_eq!(
+        slot.instruction.as_deref(),
+        Some("Three things about the incident."),
+        "the run's own sentence is repeated on each card"
+    );
+    assert_eq!(seen[1].instruction.as_deref(), None, "this question has no sentence of its own");
+
+    // And answers come back per question, exactly as they would for three lone tasks.
+    handle.emit_event("area", EventName::Action, json!({"actionId":"checkout"}));
+    let answer = recv_json(&mut ws).await;
+    assert_eq!(answer["taskId"].as_str(), Some("area"));
+    assert_eq!(answer["event"].as_str(), Some("action"));
+
+    // A run the bridge refuses delivers nothing and is blamed on the question at fault.
+    send_json(
+        &mut ws,
+        json!({
+            "type": "run",
+            "runId": "typo",
+            "questions": [
+                {"id":"ok","component":"ActionCard",
+                 "props":{"options":[{"id":"a","label":"A"}]}},
+                {"id":"broken","component":"ActionCard","props":{}},
+            ],
+        }),
+    )
+    .await;
+    let error = recv_json(&mut ws).await;
+    assert_eq!(error["type"].as_str(), Some("error"));
+    assert_eq!(error["code"].as_str(), Some("bad_frame"));
+    assert_eq!(
+        error["taskId"].as_str(),
+        Some("broken"),
+        "the error must name the question to fix: {error}"
+    );
+    assert!(
+        error["message"].as_str().unwrap_or_default().contains("props.options"),
+        "the message should say what is wrong: {error}"
+    );
+    assert!(delivered.try_recv().is_err(), "a refused run must not draw half a card");
+
+    handle.shutdown();
+}
+
+/* ------------------------------------------------------------------ *
  * Loopback only
  * ------------------------------------------------------------------ */
+
+/* ------------------------------------------------------------------ *
+ * The three newer question kinds, over a real socket
+ * ------------------------------------------------------------------ */
+
+/// A mark-up, a matching grid and a split, each asked and answered through the real bridge.
+///
+/// These three exist to widen the kinds of question a person can be asked — a place on a picture,
+/// a row-to-option pairing, a total to divide — and what matters over the wire is the same thing
+/// that matters for the other eight: the agent gets an ack, the human gets a card, and the answer
+/// comes back as an event on the same socket. The refusals matter just as much: a mark-up with no
+/// usable picture and a split that can never add up are both caught before a window opens.
+#[tokio::test]
+async fn the_three_newer_kinds_reach_a_human_and_come_back() {
+    let sink = Arc::new(TestSink::new(Delivery::Attached));
+    let mut delivered = sink.subscribe();
+    let handle = start_bridge(sink.clone()).await;
+    let mut ws = connect(&handle).await;
+    let _welcome = recv_json(&mut ws).await;
+
+    // A picture named by a plaintext address: refused, because an overlay does not get to fetch
+    // whatever a socket on the machine asks it to.
+    send_json(
+        &mut ws,
+        json!({
+            "type": "task",
+            "taskId": "t_mark_bad",
+            "component": "RegionMark",
+            "props": {"src": "http://example.com/shot.png"}
+        }),
+    )
+    .await;
+    let error = recv_json(&mut ws).await;
+    assert_eq!(error["code"].as_str(), Some("bad_frame"));
+    assert!(
+        error["message"].as_str().unwrap_or_default().contains("https"),
+        "the refusal should say what a picture may be: {error}"
+    );
+
+    // Floors that already overrun the total: a card that could never be sent, and never says why.
+    send_json(
+        &mut ws,
+        json!({
+            "type": "task",
+            "taskId": "t_budget_bad",
+            "component": "AllocateBudget",
+            "props": {
+                "total": 10,
+                "items": [
+                    {"id": "a", "label": "A", "min": 8},
+                    {"id": "b", "label": "B", "min": 9}
+                ]
+            }
+        }),
+    )
+    .await;
+    let error = recv_json(&mut ws).await;
+    assert_eq!(error["code"].as_str(), Some("bad_frame"));
+    assert!(
+        error["message"].as_str().unwrap_or_default().contains("17"),
+        "the refusal should show its arithmetic: {error}"
+    );
+    assert!(
+        sink.task_frames().is_empty(),
+        "neither refusal may reach the human's surface"
+    );
+
+    // A mark-up, answered with two marks in fractions of the picture, in the order they were
+    // drawn: a box and an X inside it, which is the shape an annotation actually has.
+    let picture = "data:image/png;base64,iVBORw0KGgo=";
+    send_json(
+        &mut ws,
+        json!({
+            "type": "task",
+            "taskId": "t_mark",
+            "component": "RegionMark",
+            "instruction": "Draw on the dashboard: circle what looks wrong.",
+            "props": {
+                "src": picture,
+                "width": 960,
+                "height": 600,
+                "tool": "ellipse",
+                "tools": ["ellipse", "arrow", "cross"]
+            }
+        }),
+    )
+    .await;
+    let ack = recv_json(&mut ws).await;
+    assert_eq!(ack["status"].as_str(), Some("rendered"));
+    assert_eq!(ack["taskId"].as_str(), Some("t_mark"));
+    assert!(
+        ack["wait"]["estimatedMs"].as_u64().is_some(),
+        "a delivered question quotes how long an answer usually takes: {ack}"
+    );
+
+    match next_delivered(&mut delivered).await {
+        AgentFrame::Task(task) => {
+            assert_eq!(task.component, "RegionMark");
+            assert_eq!(task.props["src"].as_str(), Some(picture));
+        }
+        other => panic!("expected the mark-up at the human's surface, got {other:?}"),
+    }
+
+    let answered = handle.emit_event(
+        "t_mark",
+        EventName::Submit,
+        json!({
+            "component": "RegionMark",
+            "shapes": [
+                {"kind":"ellipse","x":0.25,"y":0.1,"w":0.5,"h":0.25},
+                {"kind":"cross","at":{"x":0.5,"y":0.22}}
+            ]
+        }),
+    );
+    let event = recv_json(&mut ws).await;
+    assert_eq!(event["event"].as_str(), Some("submit"));
+    assert_eq!(event["payload"]["shapes"][0]["kind"].as_str(), Some("ellipse"));
+    assert_eq!(event["payload"]["shapes"][0]["w"].as_f64(), Some(0.5));
+    assert_eq!(event["payload"]["shapes"][1]["kind"].as_str(), Some("cross"));
+    assert_eq!(event["seq"].as_u64(), Some(answered.seq));
+
+    // The matching grid. Its partial answers arrive as signals before the last row lands, which is
+    // what lets an agent watch a matrix fill in rather than staring at a silent card.
+    send_json(
+        &mut ws,
+        json!({
+            "type": "task",
+            "taskId": "t_pairs",
+            "component": "PairMatrix",
+            "props": {
+                "options": [{"id":"checkout","label":"Checkout"},{"id":"platform","label":"Platform"}],
+                "rows": [{"id":"r1","label":"checkout smoke"},{"id":"r2","label":"staging deploy"}]
+            }
+        }),
+    )
+    .await;
+    let ack = recv_json(&mut ws).await;
+    assert_eq!(ack["status"].as_str(), Some("rendered"));
+
+    let signal = handle.emit_event("t_pairs", EventName::Select, json!({"pairs":{"r1":"checkout"}}));
+    let wire = recv_json(&mut ws).await;
+    assert_eq!(wire["event"].as_str(), Some("select"));
+    assert_eq!(wire["seq"].as_u64(), Some(signal.seq));
+    assert!(
+        !signal.event.is_terminal(),
+        "a half-placed matrix is not an answer"
+    );
+
+    let placed = handle.emit_event(
+        "t_pairs",
+        EventName::Submit,
+        json!({"component":"PairMatrix","pairs":{"r1":"checkout","r2":"platform"},"unassigned":[]}),
+    );
+    let wire = recv_json(&mut ws).await;
+    assert_eq!(wire["event"].as_str(), Some("submit"));
+    assert_eq!(wire["payload"]["pairs"]["r2"].as_str(), Some("platform"));
+    assert_eq!(wire["seq"].as_u64(), Some(placed.seq));
+
+    // The split, echoing back the figure the parts add up to.
+    send_json(
+        &mut ws,
+        json!({
+            "type": "task",
+            "taskId": "t_budget",
+            "component": "AllocateBudget",
+            "props": {
+                "total": 40,
+                "step": 5,
+                "items": [{"id":"repro","label":"Reproduce"},{"id":"bisect","label":"Bisect"}]
+            }
+        }),
+    )
+    .await;
+    let ack = recv_json(&mut ws).await;
+    assert_eq!(ack["status"].as_str(), Some("rendered"));
+
+    let split = handle.emit_event(
+        "t_budget",
+        EventName::Submit,
+        json!({"component":"AllocateBudget","allocations":{"repro":25,"bisect":15},"total":40}),
+    );
+    let wire = recv_json(&mut ws).await;
+    assert_eq!(wire["event"].as_str(), Some("submit"));
+    assert_eq!(wire["payload"]["allocations"]["repro"].as_i64(), Some(25));
+    assert_eq!(wire["payload"]["total"].as_i64(), Some(40));
+    assert_eq!(wire["seq"].as_u64(), Some(split.seq));
+
+    // All three went in front of the human, one after another, and the bridge counted every
+    // event on the way back — including the half-placed matrix.
+    assert_eq!(sink.task_frames().len(), 3);
+    assert_eq!(handle.emitted(), 4);
+
+    handle.shutdown();
+}
+
+/// The two kinds that hand work over instead of asking about it: a list of stops and a document to
+/// sign. Both are gated harder than the rest, because both can put a page in front of the human and
+/// both can carry a session into it.
+#[tokio::test]
+async fn the_two_hand_over_kinds_reach_a_human_and_come_back() {
+    let sink = Arc::new(TestSink::new(Delivery::Attached));
+    let mut delivered = sink.subscribe();
+    let handle = start_bridge(sink.clone()).await;
+    let mut ws = connect(&handle).await;
+    let _welcome = recv_json(&mut ws).await;
+
+    // A plaintext address that is not this machine: refused, because the embedded view would carry
+    // a real session to whatever the name resolves to today. A loopback `http:` is allowed.
+    send_json(
+        &mut ws,
+        json!({
+            "type": "task",
+            "taskId": "t_list_bad_url",
+            "component": "WebTask",
+            "props": {"items": [{"id": "pay", "title": "Pay it", "url": "http://example.com/pay"}]}
+        }),
+    )
+    .await;
+    let error = recv_json(&mut ws).await;
+    assert_eq!(error["code"].as_str(), Some("bad_frame"));
+    assert!(
+        error["message"].as_str().unwrap_or_default().contains("https"),
+        "the refusal should say what a delegated address may be: {error}"
+    );
+
+    // Two rows with the same id: the answer is keyed by id, so it could not say which one was done.
+    send_json(
+        &mut ws,
+        json!({
+            "type": "task",
+            "taskId": "t_list_dup",
+            "component": "WebTask",
+            "props": {"items": [
+                {"id": "pay", "title": "Pay it", "url": "https://example.com/pay"},
+                {"id": "pay", "title": "Pay it again", "url": "https://example.com/pay"}
+            ]}
+        }),
+    )
+    .await;
+    let error = recv_json(&mut ws).await;
+    assert_eq!(error["code"].as_str(), Some("bad_frame"));
+    assert!(
+        error["message"].as_str().unwrap_or_default().contains("already used"),
+        "the refusal should name the collision: {error}"
+    );
+
+    // A session with nothing in it: nothing to hand over, and nothing for the human to be asked
+    // about, so it is refused rather than injected on the strength of a label.
+    send_json(
+        &mut ws,
+        json!({
+            "type": "task",
+            "taskId": "t_list_empty_session",
+            "component": "WebTask",
+            "props": {
+                "items": [{"id": "pay", "title": "Pay it", "url": "https://example.com/pay"}],
+                "session": {"label": "your bank"}
+            }
+        }),
+    )
+    .await;
+    let error = recv_json(&mut ws).await;
+    assert_eq!(error["code"].as_str(), Some("bad_frame"));
+    assert!(
+        error["message"].as_str().unwrap_or_default().contains("session"),
+        "the refusal should say which part is wrong: {error}"
+    );
+
+    // Both a signing link and a document: the card would have to pick which one is being signed.
+    let pdf = format!("data:application/pdf;base64,{}", "A".repeat(2048));
+    send_json(
+        &mut ws,
+        json!({
+            "type": "task",
+            "taskId": "t_sign_both",
+            "component": "ESign",
+            "props": {"url": "https://sign.example.com/e/1", "document": {"src": pdf}}
+        }),
+    )
+    .await;
+    let error = recv_json(&mut ws).await;
+    assert_eq!(error["code"].as_str(), Some("bad_frame"));
+    assert!(
+        error["message"].as_str().unwrap_or_default().contains("not both"),
+        "the refusal should say the target is ambiguous: {error}"
+    );
+
+    assert!(
+        sink.task_frames().is_empty(),
+        "none of those refusals may reach the human's surface"
+    );
+
+    // The list. Two stops, one of them optional, and a session that is the shape a browser
+    // automation library already holds.
+    send_json(
+        &mut ws,
+        json!({
+            "type": "task",
+            "taskId": "t_list",
+            "component": "WebTask",
+            "instruction": "Three stops before the office closes.",
+            "props": {
+                "title": "Three stops, in any order",
+                "items": [
+                    {"id": "renew", "title": "Renew the car insurance",
+                     "url": "https://portal.example.com/renew/8842",
+                     "note": "Quote is at step three.",
+                     "done": "a policy number is on the screen"},
+                    {"id": "invoice", "title": "Pay invoice 4471",
+                     "url": "https://billing.example.com/i/4471", "optional": true}
+                ],
+                "session": {
+                    "label": "your portal login",
+                    "cookies": [{"name": "sid", "value": "abc", "domain": ".example.com", "httpOnly": true}],
+                    "origins": [{"origin": "https://portal.example.com",
+                                 "localStorage": [{"name": "auth.token", "value": "t0k"}]}]
+                },
+                "returnFiles": true
+            }
+        }),
+    )
+    .await;
+    let ack = recv_json(&mut ws).await;
+    assert_eq!(ack["status"].as_str(), Some("rendered"));
+    assert_eq!(ack["taskId"].as_str(), Some("t_list"));
+
+    match next_delivered(&mut delivered).await {
+        AgentFrame::Task(task) => {
+            assert_eq!(task.component, "WebTask");
+            assert_eq!(task.props["items"][0]["id"].as_str(), Some("renew"));
+            assert_eq!(task.props["session"]["cookies"][0]["name"].as_str(), Some("sid"));
+        }
+        other => panic!("expected the list at the human's surface, got {other:?}"),
+    }
+
+    // A row being ticked off is progress, not an answer: the card is still up and still open.
+    let progress = handle.emit_event(
+        "t_list",
+        EventName::Change,
+        json!({
+            "name": "webtask-item", "value": "done",
+            "tasks": [{"id": "renew", "status": "done", "note": "12-month term"}],
+            "opened": 1, "done": 1, "total": 2
+        }),
+    );
+    let wire = recv_json(&mut ws).await;
+    assert_eq!(wire["event"].as_str(), Some("change"));
+    assert_eq!(wire["seq"].as_u64(), Some(progress.seq));
+    assert!(
+        !progress.event.is_terminal(),
+        "a half-done list is not an answer"
+    );
+
+    let sent = handle.emit_event(
+        "t_list",
+        EventName::Submit,
+        json!({
+            "component": "WebTask",
+            "tasks": [
+                {"id": "renew", "status": "done", "note": "12-month term",
+                 "lastUrl": "https://portal.example.com/renew/8842/thanks"},
+                {"id": "invoice", "status": "pending"}
+            ],
+            "opened": 1, "done": 1, "total": 2,
+            "skipped": [],
+            "notes": "the portal wanted the policy number from the renewal email",
+            "sessionKept": false,
+            "files": {"renew": {"mime": "application/pdf", "filename": "policy.pdf",
+                               "size": 3, "data": "AAAA"}}
+        }),
+    );
+    let wire = recv_json(&mut ws).await;
+    assert_eq!(wire["event"].as_str(), Some("submit"));
+    assert_eq!(wire["payload"]["tasks"][0]["id"].as_str(), Some("renew"));
+    assert_eq!(
+        wire["payload"]["tasks"][0]["lastUrl"].as_str(),
+        Some("https://portal.example.com/renew/8842/thanks")
+    );
+    assert_eq!(wire["payload"]["tasks"][1]["status"].as_str(), Some("pending"));
+    assert_eq!(
+        wire["payload"]["files"]["renew"]["filename"].as_str(),
+        Some("policy.pdf")
+    );
+    assert_eq!(wire["seq"].as_u64(), Some(sent.seq));
+
+    // The signature. A document with no form in it at all, so the fields are the agent's own
+    // coordinates, and the bytes come back through the answer.
+    send_json(
+        &mut ws,
+        json!({
+            "type": "task",
+            "taskId": "t_sign",
+            "component": "ESign",
+            "instruction": "Sign page 3 and date it.",
+            "props": {
+                "document": {"src": pdf, "filename": "lease.pdf", "mime": "application/pdf"},
+                "fields": [
+                    {"id": "sig", "page": 3, "kind": "signature", "label": "Sign here",
+                     "x": 0.12, "y": 0.72, "w": 0.3, "h": 0.06, "required": true},
+                    {"id": "dated", "page": 3, "kind": "date", "x": 0.12, "y": 0.8, "w": 0.2, "h": 0.04}
+                ],
+                "returnSignedCopy": true
+            }
+        }),
+    )
+    .await;
+    let ack = recv_json(&mut ws).await;
+    assert_eq!(ack["status"].as_str(), Some("rendered"));
+
+    match next_delivered(&mut delivered).await {
+        AgentFrame::Task(task) => {
+            assert_eq!(task.component, "ESign");
+            assert_eq!(task.props["fields"][0]["kind"].as_str(), Some("signature"));
+        }
+        other => panic!("expected the signature request at the human's surface, got {other:?}"),
+    }
+
+    let signed = handle.emit_event(
+        "t_sign",
+        EventName::Submit,
+        json!({
+            "component": "ESign", "completed": true, "source": "filled",
+            "document": {"mime": "application/pdf", "filename": "lease-signed.pdf",
+                         "size": 4, "data": "JVBG"},
+            "signer": {"name": "A Person", "signedAt": "2026-10-27T09:14:02.113Z"},
+            "fields": {"sig": "drawn signature", "dated": "2026-10-27"}
+        }),
+    );
+    let wire = recv_json(&mut ws).await;
+    assert_eq!(wire["event"].as_str(), Some("submit"));
+    assert_eq!(wire["payload"]["source"].as_str(), Some("filled"));
+    assert_eq!(
+        wire["payload"]["document"]["filename"].as_str(),
+        Some("lease-signed.pdf")
+    );
+    assert_eq!(
+        wire["payload"]["fields"]["sig"].as_str(),
+        Some("drawn signature"),
+        "a signature is described, never shipped as an image of itself"
+    );
+    assert_eq!(wire["seq"].as_u64(), Some(signed.seq));
+
+    assert_eq!(sink.task_frames().len(), 2);
+    assert_eq!(handle.emitted(), 3);
+
+    handle.shutdown();
+}
 
 #[tokio::test]
 async fn the_bridge_refuses_to_listen_off_loopback() {

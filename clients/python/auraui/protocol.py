@@ -30,6 +30,9 @@ EVENT_NAMES = (
     "error",
 )
 
+#: The component kinds the canvas draws. Same order as ``COMPONENT_NAMES`` in the Rust bridge
+#: and the list quoted in ``docs/PROTOCOL.md``, because that order is what an agent sees in
+#: the ``unknown_component`` message.
 COMPONENT_NAMES = (
     "ActionCard",
     "Notice",
@@ -37,10 +40,21 @@ COMPONENT_NAMES = (
     "SortableList",
     "DataGrid",
     "InteractiveChart",
+    "RatingScale",
+    "DiffReview",
+    "RegionMark",
+    "PairMatrix",
+    "AllocateBudget",
+    "WebTask",
+    "ESign",
 )
 
 NOTICE_LEVELS = ("info", "success", "warn", "error")
 NOTE_KINDS = ("thinking", "progress", "result", "meta")
+
+#: How many questions one ``run`` may carry. Mirrors ``RUN_LIMIT`` in the Rust bridge, which
+#: refuses a longer one: past this a run stops being a set of questions and becomes a form.
+RUN_LIMIT = 12
 
 #: One task frame or event frame above this size is a bug, not a payload.
 MAX_FRAME_BYTES = 16 * 1024 * 1024

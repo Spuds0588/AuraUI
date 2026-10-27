@@ -1,1 +1,1 @@
-{"default":{"identifier":"default","description":"Default capabilities for the AuraUI canvas window.","local":true,"windows":["main"],"permissions":["core:default","core:event:default","core:window:default","core:webview:default"]}}
+{"default":{"identifier":"default","description":"Default capabilities for the AuraUI canvas webview, and only that webview.","local":true,"webviews":["main"],"permissions":["core:default","core:event:default","core:window:default","core:webview:default"]}}

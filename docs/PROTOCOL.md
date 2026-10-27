@@ -66,12 +66,15 @@ who is mid-answer.
 
 Four consequences worth designing around:
 
-- **Do not fan out.** Sending six unrelated tasks at once does not show six cards; it shows
-  one and makes the human work through a queue. Prefer one question that decides the next.
+- **Group what you already know; split what depends on itself.** An agent with four
+  independent things to ask should send them as one `run`, not four `task` frames: the same
+  set then reads as one ask ("Question 2 of 4") and comes back as one result. Questions that
+  depend on earlier answers stay separate calls. That interview is what this canvas is for,
+  and a run of questions you would not have asked is worse than asking them one at a time.
 - **Queue depth is legible.** The canvas draws a single quiet line under the card saying how
   many questions are waiting, so the human knows whether they are nearly done.
-- **`note` and `notify` are not queued.** Narration is narration; a `notify` shows as a toast
-  without pushing anything into the queue.
+- **`note` is not queued.** Narration is narration, and it never pushes anything into the
+  queue.
 - **One press finishes a question.** A choice, a row in a single-select grid, a point on a
   scale and a hunk decision are all sent by the press that makes them. Only a question that
   needs words — a field to type in, a set to assemble, a list to order — asks for a button
@@ -105,10 +108,44 @@ Only `agent.name` is required.
 | Field | Required | Meaning |
 | --- | --- | --- |
 | `taskId` | yes | Non-empty. Re-sending it replaces the card on the canvas. |
-| `component` | yes | One of the eight kinds in §4. |
+| `component` | yes | One of the thirteen kinds in §4. |
 | `props` | yes | Renderer payload, shapes in §4. |
 | `instruction` | no | One or two sentences aimed at the human, drawn above the card. |
 | `urgent` | no | Adds an accent border and a "needs you" chip. Not colour alone. |
+
+### `run` — ask several questions in one call
+
+```json
+{ "v": "1.0", "type": "run", "runId": "incident",
+  "instruction": "Two things about the incident.",
+  "questions": [
+    { "id": "area", "component": "ActionCard", "instruction": "Where did it break?",
+      "props": { "options": [ { "id": "checkout", "label": "Checkout" } ] } },
+    { "id": "severity", "component": "RatingScale", "props": { "max": 5 } }
+  ] }
+```
+
+| Field | Required | Notes |
+| --- | --- | --- |
+| `runId` | yes | Non-empty. Groups the questions in the log and on the card. |
+| `instruction` | no | One sentence for the whole set, drawn on every card of it. |
+| `questions` | yes | One to twelve questions, in the order the human should be asked them. |
+
+Each question is `{ id, component, props, instruction?, urgent? }`. **`id` is that question's
+task id**: the answer arrives on it, carrying that `taskId`, and it is what `resolve`,
+`waitFor` and `answers` name.
+
+The bridge expands a run before anything reaches the canvas, so a question inside a run is an
+ordinary task in every other respect — same `ack` with the same `wait` plan, same `event`,
+same `progress` check-ins, same retention in `answers`. The one addition is a `run` block on
+the task frame, `{ runId, index, total, instruction? }`, which is what lets the card say
+"Question 2 of 4" and lets the line under it count what is left in the set rather than lumping
+it in with everything else queued.
+
+A run is validated as a whole and refused as a whole: one bad question means **no** card is
+drawn at all, and the `error` names the question at fault in `taskId`. One question per card is
+still what the human sees — a run changes how many questions arrive at once, never how they
+are answered.
 
 ### `update` — change a card in place
 
@@ -131,15 +168,6 @@ and leave `vegaSchema` alone.
 Use this after receiving a non-terminal event (`select`, `sort`, `change`) when a selection
 *is* the answer. A card the agent withdrew must not still be on screen.
 
-### `notify` — transient toast
-
-```json
-{ "v": "1.0", "type": "notify", "level": "warn", "message": "Staging is locked for 10 min." }
-```
-
-`level` is `info | success | warn | error`. Toasts replace each other; never send an answer
-through a toast.
-
 ### `note` — a line of narration
 
 ```json
@@ -148,6 +176,13 @@ through a toast.
 
 `kind` is `thinking | progress | result | meta` (default `meta`). This is the cheap channel:
 no answer is expected, and it is what makes a long-running agent legible while it works.
+
+**This is the only way an agent says something without asking something.** A `notify` frame
+once floated a toast in the corner of the human's screen; it is gone, and a frame with
+`"type": "notify"` now comes back as `unknown_type`. It was removed because it duplicated this
+badly: a toast is chrome parked over someone else's work, it cannot be re-read once it has
+faded, and it says nothing a line of narration does not say better, in the place the human is
+already looking.
 
 The canvas renders **only the newest note, and only while it is at rest** — one quiet line
 where the status text would otherwise sit. Notes never stack and never get a row of their own,
@@ -169,7 +204,8 @@ Answered with a targeted `pong`. The transport's own ping/pong is also handled.
 ### `ack` — did anyone actually see it?
 
 ```json
-{ "v": "1.0", "type": "ack", "taskId": "triage", "status": "rendered" }
+{ "v": "1.0", "type": "ack", "taskId": "triage", "status": "rendered",
+  "wait": { "estimatedMs": 90000, "pollIntervalMs": 5000, "expiresAt": 1775487021482 } }
 ```
 
 | Status | Meaning | What to do |
@@ -190,6 +226,74 @@ frame. It is `queued` only when there is genuinely no canvas to draw it.
 
 Acks are sent for `task`, `update` and `resolve`. They arrive **before** the human's `event`,
 because understanding is not answering.
+
+`wait` rides on the ack for a `task` and nothing else, because that is the one frame an agent
+is expected to block on. It is the confirmation half of asking a person anything: the question
+is up, an answer usually takes about this long, and here is how often the canvas will check in
+the meantime.
+
+**Nothing here times a question out.** `expiresAt` is `estimatedMs` after the ack was stamped,
+and the human is under no obligation to answer before it. Past that point the card is still on
+screen, the check-ins keep coming, and it is up to the agent to decide what a long silence
+means. Set `AURAUI_WAIT_ESTIMATE_MS` on the bridge to change the estimate.
+
+### `progress` — still waiting, and here is what they have picked so far
+
+```json
+{ "v": "1.0", "type": "progress", "taskId": "triage", "state": "answering",
+  "elapsedMs": 12750, "estimatedMs": 90000, "remainingMs": 77250,
+  "signals": [ { "event": "select", "payload": { "rowIds": ["smoke-8843"] },
+                 "at": 1775486944231 } ],
+  "at": 1775486944231 }
+```
+
+Sent on the interval the ack quoted while a question is unanswered, and immediately whenever
+the human does something on the card.
+
+| `state` | Meaning |
+| --- | --- |
+| `waiting` | The card is up and nobody has touched it. |
+| `answering` | The human has started. |
+
+That distinction is the whole reason these frames exist: from the outside, a person reading a
+question and a person who left the room look exactly alike, and an agent blocked on a person
+has no way to tell them apart on its own.
+
+`signals` carries the **non-terminal** events the human has produced on this card — a
+highlighted row, a half-filled form, one hunk already decided — newest first. They are the
+same events the agent already receives as `event` frames; carrying a copy here is what makes a
+partial answer and the fact that it is being given arrive together, rather than as two
+unrelated things on two schedules.
+
+`remainingMs` saturates at zero. A wait that outlasts the estimate keeps reporting; there is
+no frame that says "give up".
+
+### `answers` — what was said while you were not waiting
+
+An agent asks:
+
+```json
+{ "v": "1.0", "type": "answers", "taskIds": ["triage"] }
+```
+
+Omit `taskIds` to ask for everything the bridge still holds. It is answered to the asking agent
+alone, unlike an `ack`, which every agent sees:
+
+```json
+{ "v": "1.0", "type": "answers", "items": [
+  { "taskId": "triage", "event": "action", "payload": { "actionId": "investigate" },
+    "seq": 1, "at": 1775486931482 } ] }
+```
+
+The bridge keeps every terminal event for **ten minutes**, newest first, up to **64** of them,
+and an answer for a task replaces any earlier answer for that same task rather than stacking.
+`seq` is the number the live event carried, so a replayed answer and a seen one are the same
+event and an agent can tell that it already handled it.
+
+This is the one thing a blocking call cannot answer for itself. A tool call that gave up, an
+agent that was restarted mid-question, a host that resumed a turn the human answered during —
+none of them can learn what the person said, and all of them can ask here instead of asking the
+person to answer twice.
 
 ### `event` — the human answered
 
@@ -239,8 +343,10 @@ single-select `DataGrid`, a `RatingScale` point, a single-hunk `DiffReview` — 
 The `submit` payload is a **superset**: which keys appear depends on the component that sent
 it. `values` comes from a `WizardForm`, `order` from a `SortableList`, `rowIds`/`rows` from a
 `DataGrid`, `value`/`label` from a `RatingScale`, `decisions`/`accepted`/`rejected` from a
-`DiffReview`, and `audio` from any field the human spoke into. Read the keys you asked for
-instead of assuming one shape.
+`DiffReview`, `region`/`point`/`mode` from a `RegionMark`, `pairs`/`unassigned` from a
+`PairMatrix`, `allocations`/`total` from an `AllocateBudget`, `tasks`/`opened`/`done`/`skipped`
+from a `WebTask`, `completed`/`source` from an `ESign`, and `audio` from any field the human spoke
+into. Read the keys you asked for instead of assuming one shape.
 
 Both SDKs resolve a blocking `task()` call on the **first terminal event** for that taskId.
 
@@ -252,7 +358,7 @@ than waiting.
 
 ```json
 { "v": "1.0", "type": "error", "code": "unknown_component",
-  "message": "Unknown component \"Chart\". Supported: ActionCard, Notice, WizardForm, SortableList, DataGrid, InteractiveChart, RatingScale, DiffReview." }
+  "message": "Unknown component \"Chart\". Supported: ActionCard, Notice, WizardForm, SortableList, DataGrid, InteractiveChart, RatingScale, DiffReview, RegionMark, PairMatrix, AllocateBudget, WebTask, ESign." }
 ```
 
 | Code | Cause |
@@ -261,7 +367,7 @@ than waiting.
 | `bad_frame` | No `type`, or a required field is missing or the wrong type. Also used for task `props` the bridge refuses, such as a removed wizard field kind or empty `options`; `message` says which. |
 | `unknown_type` | `type` is not a frame in this document. |
 | `unsupported_version` | `v` is not `1.0`. |
-| `unknown_component` | `component` is not one of the eight. |
+| `unknown_component` | `component` is not one of the thirteen. |
 | `unknown_task` | An operation named a taskId that is not open. |
 
 Validation happens in that order. A `bad_json` frame **does not close the socket**: one
@@ -271,6 +377,11 @@ malformed frame must not cost a working session. Fix and resend.
 
 Every component is a React component in the canvas. None of them execute agent-supplied
 code, and none of them accept HTML.
+
+`WebTask` and `ESign` are the two that show something the canvas did not draw: an embedded browser
+the shell places above the card, loading a page the agent named. Their own controls are still
+canvas pixels, the address is still drawn by the canvas rather than the page, and §6 sets out what
+that costs and what it does not.
 
 ### ActionCard — a decision
 
@@ -568,6 +679,323 @@ Send **one hunk per card**. Because the review cannot be sent until every hunk i
 a decision, a card with two hunks is two questions wearing one card, and the human pays for
 that with a second press.
 
+### RegionMark — the human draws on a picture
+
+```json
+{ "src": "data:image/png;base64,iVBORw0KGgo…",
+  "width": 1280, "height": 800,
+  "tool": "ellipse",
+  "tools": ["ellipse", "arrow", "cross"],
+  "alt": "staging checkout dashboard: p95 412ms, error rate 6.1%",
+  "label": "staging / checkout, 1280x800",
+  "submitLabel": "Send this drawing" }
+```
+
+"Draw a box around the element that is rendering wrong" — the Oracle case — with a picture
+instead of a webview. You send the image; the human draws on it; you get the drawing back.
+
+It is a **canvas, not a picker**. One box is a poor vocabulary for "here is what is wrong": the
+useful answer is usually a few marks and the relationship between them — circle the panel, then
+an arrow from it to the number that explains it — so the card offers five pens and takes as many
+marks as the answer needs.
+
+| Pen | Needs | Drawn as |
+| --- | --- | --- |
+| `rect` | a drag | `{ "kind": "rect", "x": …, "y": …, "w": …, "h": … }` |
+| `ellipse` | a drag | `{ "kind": "ellipse", "x": …, "y": …, "w": …, "h": … }` |
+| `arrow` | a drag | `{ "kind": "arrow", "from": {…}, "to": {…} }` |
+| `cross` | one press | `{ "kind": "cross", "at": {…} }` |
+| `path` | a drag | `{ "kind": "path", "points": [{…}, …] }` |
+
+A box and a circle are given as the box they fit inside. An arrow keeps both ends as they were
+drawn, because which end is the head is half of what it says. Freehand keeps the line itself.
+
+**The answer is fractions of the image, never pixels, and in the order the marks were drawn.**
+You know the size of what you sent; the canvas knows only how large it managed to draw it on
+whatever screen the card landed on. A fraction is the one coordinate both sides agree on without
+either being told the other's size, and it survives the window being resized between the question
+and the answer. `x`, `y`, `w`, `h`, `from`, `to`, `at` and every point in `points` are all `0` to
+`1`, with the origin at the top-left. Order is what lets you say "the arrow from the first box",
+and the card numbers each mark on the picture so the human can see the same numbering you read.
+
+The drawing is sent by a button, not by the last stroke: a mark is chosen by making it, and the
+moment a drag ends is the moment a person is least sure they got the edge right. Anything can be
+taken back before that.
+
+```json
+{ "component": "RegionMark",
+  "shapes": [
+    { "kind": "ellipse", "x": 0.25, "y": 0.1, "w": 0.5, "h": 0.25 },
+    { "kind": "arrow", "from": { "x": 0.75, "y": 0.35 }, "to": { "x": 0.86, "y": 0.66 } },
+    { "kind": "cross", "at": { "x": 0.86, "y": 0.66 } }
+  ] }
+```
+
+The whole card works from the keyboard, because the pictures worth marking are usually on the
+screen the mouse is already pointing at something on. Digits pick the pen — each one is printed
+on its button — the arrow keys aim a crosshair (hold Shift for a bigger step), Enter drops the
+first point and again the second, and Backspace takes back the last mark.
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `src` | yes | An `https:` URL, or a `data:image/…` URL. **Nothing else.** |
+| `tool` | no | The pen the card opens on: `rect` (default), `ellipse`, `arrow`, `cross` or `path`. |
+| `tools` | no | Which pens to offer, in order. Omitted means all five. |
+| `width`, `height` | no | The image's natural size in pixels, so the frame has the right shape before it loads. |
+| `alt` | no | Alt text. Send it: it is the only description a screen reader gets. |
+| `label` | no | A caption above the picture. |
+| `submitLabel` | no | The label on the button that sends the drawing. |
+| `help` | no | Your own words under the picture, replacing the canvas's. |
+
+`tools` is the question as much as the instruction is: an agent that wants to know *which way
+the flow goes* sends `"tools": ["arrow"]` rather than asking a question with five answers. An
+empty list, or a pen that does not exist, is refused at the bridge — a toolbar that cannot mark
+the thing that was asked is worse than no toolbar at all.
+
+**`src` is restricted to `https:` and `data:image/`.** AuraUI draws over whatever the human was
+already doing, so it will not fetch a plaintext address or read a local file on the say-so of
+whatever opened a socket. An agent holding a screenshot base64s it, which is the common case
+anyway — both SDKs ship an `image_data` / `imageData` helper for exactly that.
+
+### PairMatrix — put each of these where it belongs
+
+```json
+{ "options": [ { "id": "checkout", "label": "Checkout team" },
+               { "id": "platform", "label": "Platform team" } ],
+  "rows": [ { "id": "smoke-8841", "label": "checkout smoke, +318% duration" },
+            { "id": "smoke-8847", "label": "staging deploy, 2.14.3", "options": ["platform"] } ],
+  "requireAll": true,
+  "help": "Every row needs a home." }
+```
+
+One question — which bucket each row goes in — answered by one press per row, the way a
+`SortableList` is one question answered by one drag per item. `rows[].options` narrows a row to
+a subset of the option ids, which is how you refuse a pairing you already know is impossible
+instead of asking the human not to pick it.
+
+**The press that places the last open row sends the answer**, exactly as the last undecided hunk
+does in a `DiffReview`. Until then each placement emits non-terminal `select`:
+
+```json
+{ "pairs": { "smoke-8841": "checkout" }, "unassigned": ["smoke-8847"] }
+```
+
+With `requireAll` at its default the terminal event is:
+
+```json
+{ "component": "PairMatrix",
+  "pairs": { "smoke-8841": "checkout", "smoke-8847": "platform" },
+  "unassigned": [] }
+```
+
+With `requireAll: false` a row may be left alone on purpose — "which of these are the same
+bug?" — and since the rows you left alone are then part of the answer, a button appears to send
+it. `unassigned` lists those row ids in the order they were sent.
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `rows` | yes | Non-empty. Each needs a non-empty `id` and `label`; ids must be unique. |
+| `rows[].options` | no | A non-empty subset of the option ids. Omitted means every option is offered. |
+| `options` | yes | Non-empty. Each needs a non-empty `id` and `label`; ids must be unique. |
+| `requireAll` | no | Default `true`. `false` lets rows be left open and adds a submit button. |
+| `submitLabel` | no | Only used when `requireAll` is `false`. |
+
+Every option is a button on every row that offers it, so a row is answered by a press rather
+than by opening a menu and finding the right entry — AuraUI has no dropdown anywhere, and a
+matrix of them would be the worst place to start. Rows are numbered, and the digit opens a row
+whose options then take letters, so the whole grid is reachable without the pointer.
+
+### AllocateBudget — share this out
+
+```json
+{ "total": 40, "step": 5,
+  "items": [ { "id": "repro", "label": "Reproduce the slow checkout" },
+             { "id": "bisect", "label": "Bisect the cart reducer", "min": 5 } ],
+  "help": "It has to add up to 40 before I can take it." }
+```
+
+Every line is a number with `minus` and `plus` buttons, and the figure left to give is on screen
+the whole time. That is the reason it is a row of steppers rather than a row of sliders: a slider
+cannot say how far one press goes, and it never says what is left over, so a human slides five of
+them, lands a little off, and sends it anyway.
+
+With `requireTotal` at its default the answer cannot be sent until the parts add up; the button
+stays shut and the canvas says how much is left. Each nudge emits non-terminal `change`:
+
+```json
+{ "name": "repro", "value": 25 }
+```
+
+The button emits:
+
+```json
+{ "component": "AllocateBudget",
+  "allocations": { "repro": 25, "bisect": 15 },
+  "total": 40 }
+```
+
+`total` is echoed back in the answer as a cheap sanity check: the whole point of the question is
+that the parts add up to a number you chose, and the one thing you do not want to have to
+discover later is that they did not.
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `items` | yes | Non-empty. Each needs a non-empty `id` and `label`; ids must be unique. |
+| `items[].min` | no | A floor for that line. `0` by default. |
+| `total` | yes | A whole number, 1 or more. What the parts have to add up to. |
+| `step` | no | A whole number from 1 to `total`. Default `1`. |
+| `requireTotal` | no | Default `true`: the answer cannot be sent until it adds up. |
+| `submitLabel` | no | The label on the send button. |
+
+`items[].min` values that already add up to more than `total` are **refused at the bridge**: that
+card could never reach its own total, so it could never be sent, and the human would have no way
+to say so.
+
+### WebTask — go and do these on the web
+
+```json
+{ "title": "Three stops, in any order",
+  "intro": "Each row says what finished looks like.",
+  "items": [ { "id": "renew-insurance", "title": "Renew the car insurance",
+               "url": "https://portal.example.com/renew/8842",
+               "note": "Quote is at step three. Take the 12-month term.",
+               "done": "a policy number is on the screen" } ],
+  "session": { "label": "your portal login", "cookies": [ … ], "origins": [ … ] },
+  "openIn": "embedded",
+  "allowSkip": true,
+  "returnFiles": true,
+  "submitLabel": "Send the list back" }
+```
+
+One URL or a list of them, done by the human in an embedded browser inside the card, with a note
+per row. This is the first kind here that is not answered by pressing something: the answer is a
+*session*, and what comes back is what happened on each stop.
+
+`items[].done` is not decoration. "Complete" with no definition is the failure mode of every
+delegated task, so the agent has to say what it will accept and the human gets to check that against
+what is on screen.
+
+Progress streams as non-terminal `change`, and it carries the **whole board**:
+
+```json
+{ "name": "webtask-item", "value": "done",
+  "tasks": [ { "id": "renew-insurance", "status": "done", "note": "used the 12-month term",
+               "lastUrl": "https://portal.example.com/renew/8842", "openedAt": 1774…, "completedAt": 1774… } ],
+  "opened": 1, "done": 1, "total": 3 }
+```
+
+`value` ∈ `opened | done | skipped | noted | attached`. The same argument as an
+`AllocateBudget`'s `allocations`: a queue only means anything as a whole, and an agent that has to
+reassemble "3 of 7 done" from a series of single-row deltas will get it wrong the first time a row
+is reopened.
+
+The send button emits `submit`:
+
+```json
+{ "component": "WebTask",
+  "tasks": [ { "id": "renew-insurance", "status": "done", "note": "…",
+               "lastUrl": "https://portal.example.com/renew/8842",
+               "openedAt": 1774…, "completedAt": 1774… },
+             { "id": "book-slot", "status": "skipped" } ],
+  "opened": 2, "done": 1, "total": 3,
+  "skipped": ["book-slot"],
+  "notes": "the portal wanted the policy number from the renewal email",
+  "sessionKept": false,
+  "files": { "pay-invoice": { "mime": "application/pdf", "filename": "receipt.pdf",
+                             "size": 41233, "data": "<base64>" } } }
+```
+
+Every row is present, and `skipped` names the ones the human chose not to do — which is the
+difference between "they said no" and "they ran out of time". A row that was never touched comes
+back `status: "pending"`.
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `items` | yes | 1 to 32 rows. Each needs a non-empty `id`, a non-empty `title` and a `url`; ids must be unique. |
+| `items[].url` | yes | `https:`, or `http:` on this machine. See §6. |
+| `items[].note` | no | The agent's own instructions for that stop, drawn on the row. |
+| `items[].done` | no | What finished looks like, in the agent's words. |
+| `items[].optional` | no | Marks a row that may be skipped without stopping the answer. |
+| `session` | no | Cookies and per-origin `localStorage` to carry into the embedded browser. |
+| `openIn` | no | `embedded` or `browser`. `browser` is forced wherever no embedded view exists. |
+| `autoAdvance` | no | Default `false`. Moves the eye to the next open row when one is done. Never opens it. |
+| `allowSkip` | no | Default `true`. |
+| `returnFiles` | no | Default `false`. Offers a file control per row, for a stop that ends in a download. |
+
+A row's state survives a restart: the canvas keeps it in `localStorage` under the task id, so
+re-sending the same `taskId` resumes the list rather than resetting it. An `update` that adds rows
+leaves the rows already marked alone, because ids are the join.
+
+### ESign — sign this
+
+```json
+{ "url": "https://sign.example.com/envelope/9f3c1a02" }
+```
+
+or:
+
+```json
+{ "document": { "src": "https://…/lease.pdf", "filename": "lease-renewal.pdf",
+                "mime": "application/pdf" },
+  "fields": [ { "id": "tenant.signature", "kind": "signature", "page": 1,
+                "label": "Signature", "x": 0.104, "y": 0.318, "w": 0.44, "h": 0.055,
+                "required": true } ],
+  "useAcroForm": true,
+  "flatten": true,
+  "signer": { "name": "", "email": "" },
+  "submitLabel": "Send the signed copy" }
+```
+
+Two modes, because there are two real situations. A **`url`** is a signing page at a provider: the
+human signs there, in the provider's own flow, and what comes back is a confirmation, who signed,
+and whatever copy they attach. A **`document`** is the PDF itself, and the canvas does more with it:
+it renders the pages, puts a box exactly where each field goes, takes a drawn or typed signature,
+fills the document and hands the signed bytes back as `document` in the answer.
+
+Exactly one of `url` and `document`. Field coordinates are fractions of the page with the origin at
+the top left — the same language `RegionMark` uses for marks on a picture — and pages are numbered
+from 1. `kind` ∈ `text | date | initials | signature | checkbox`.
+
+`fields` matters most for documents with **no form in them at all**, which is most of what a person
+is asked to sign: the agent says where the signature goes by coordinate and the canvas draws it
+there. When the document does carry an AcroForm, its widgets are picked up by name (`useAcroForm`,
+on by default) and merged with the declared fields, which override them where the ids match.
+
+The answer:
+
+```json
+{ "component": "ESign", "completed": true, "source": "filled",
+  "document": { "mime": "application/pdf", "filename": "lease-renewal.pdf",
+                "size": 51204, "data": "<base64>" },
+  "signer": { "name": "A Person", "email": "a@b.example", "signedAt": "2026-10-27T09:14:02.113Z" },
+  "fields": { "tenant.name": "A Person", "tenant.signature": "drawn signature" } }
+```
+
+`source` ∈ `filled | attached | provider`: whether the canvas filled the document, the human
+attached a copy a provider gave them, or they only confirmed the signing. `fields` carries the text
+values and *describes* signatures as `drawn signature` or `typed signature (A Person)`; it never
+carries an image of one.
+
+Progress streams as `change` with `{ "filled": 2, "totalFields": 3 }`.
+
+What this is not, and the card says so too: **a drawn signature is a picture of a signature.** It is
+drawn onto the page. pdf-lib has no cryptographic signing and no certificate, so this fills and
+marks documents, it does not notarise them. Encrypted documents and XFA forms cannot be written by
+pdf-lib at all: both are detected, the card says which one happened, and the attach-a-copy path is
+offered instead. A returned document is capped at 8 MiB (base64 inflates by a third, and the frame
+cap in §6 is 16 MiB); past that, a link is the honest answer rather than bytes.
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `url` | one of | An `https:` signing page. |
+| `document` | one of | `{ src, filename?, mime? }`. `src` is `https:` or `data:application/pdf;base64,…`. |
+| `fields` | no | Up to 64 fields to place. |
+| `useAcroForm` | no | Default `true`: merge the document's own form fields. |
+| `flatten` | no | Default `true`: bake the values in and drop the interactive fields. |
+| `signer` | no | Prefill the "who is signing" line. |
+| `returnSignedCopy` | no | Default `true`. Offer attach-a-copy even in document mode. |
+| `session` | no | A provider link often needs a login, so the same machinery as `WebTask`. |
+
 ### Unknown components
 
 Rejected at the bridge with `unknown_component` and never rendered. If a spec fails to
@@ -600,6 +1028,42 @@ compile, the canvas draws the compiler error in the card instead of an empty box
   and `icon` resolves only against a fixed allow-list.
 - Payloads are capped at 16 MiB per frame.
 
+### The one exception, and what it costs
+
+`WebTask` and `ESign` load a real page in an embedded browser, and that is a genuine departure
+from the rule above. The page is a native child webview inside the overlay window, not markup
+rendered by the canvas, and it can do anything a browser tab can do — including asking the human
+for a password.
+
+That is the risk worth naming plainly: an agent steered by content it read could point the
+embedded browser at a page it controls and ask the human to "log in to continue". Nothing here
+stops that from being attempted. What the design does is make it hard to mistake, and limit what
+it is worth:
+
+- **The address is drawn by us, never by the page.** The toolbar's origin strip is canvas pixels
+  above the embedded view, and an embedded page cannot paint over it. The host is shown with a
+  lock glyph for `https` and a warning glyph otherwise.
+- **Session handover is a question, not a default.** Nothing is placed until the human is shown
+  the exact origins and the counts of cookies and stored values, and says yes. Values are never
+displayed, here or anywhere else, and the choice can be remembered per origin.
+- **A cookie is only placed for the host being opened.** A payload naming three sites cannot
+  spray bank cookies at a shopping cart.
+- **Runs are isolated.** Every task gets its own webview data directory, and the cookies placed
+  for it are deleted when the card finishes unless the human chose to keep the sign-in.
+- **The embedded page cannot talk to the app.** The canvas is the only webview with any IPC
+  access: the capability file scopes it to the canvas webview by label, and every command in the
+  shell refuses a caller that is not the canvas.
+- **Only `https:` (or `http:` on loopback) may be opened**, checked at the bridge before a card
+  exists and again by the shell before a window exists. `javascript:`, `data:` and `file:` are
+  refused by name, and a running page that tries to navigate to one is stopped and the card says so.
+- **Nothing is auto-filled or auto-submitted.** The canvas never types into the page and never
+  presses its buttons.
+
+What is *not* mitigated, and should be said: a human who says yes to a hostile origin has handed
+that session over, and the card has no way to know the difference between a portal and a phishing
+page wearing the same hostname. The defence is the origin on screen, the explicit ask, and a person
+who recognises the site they are being asked about.
+
 ## 7. When the agent goes away
 
 An answer is only worth as much as the socket it travels down. The moment the last agent
@@ -610,10 +1074,20 @@ not pretend otherwise:
   land on a socket that is closed.
 - The card says so, in a line in its own place: *"The agent disconnected before you answered,
   so this question is no longer answerable. It closes in N seconds."*
-- After a **six second** grace period the question is dropped and a toast records why. The
-  grace exists so a bridge restart, or an agent that reconnects immediately, does not throw
-  away a question the human was mid-way through answering.
+- After a **six second** grace period the question is dropped, leaving the screen the way
+  every other card leaves it. Nothing is announced anywhere else: the countdown above was the
+  explanation, and a badge in the corner about a card you watched leave is chrome for nothing.
+  The grace exists so a bridge restart, or an agent that reconnects immediately, does not
+  throw away a question the human was mid-way through answering.
 - If an agent reconnects inside the grace period, the question becomes answerable again.
+
+**A delegated web task is the exception, deliberately.** Dropping a card six seconds after an
+agent disconnects is right for a question and wrong for a session: someone halfway through a
+checkout or a signature must not have the page pulled out from under them. So a `WebTask` or
+`ESign` card keeps its embedded browser, keeps its rows and notes, and says how the human can still
+hand the work back — the `submit` is retained by the bridge like any terminal event, for
+ten minutes, and an agent that reconnects inside that window collects it with `answers`. Past the
+window the answer is gone, which the card does not claim otherwise about.
 
 There is no frame for any of this on the wire, because the agent is not there to read one.
 The practical consequence for agent authors: **a question that goes unanswered while you are
@@ -621,7 +1095,75 @@ disconnected is gone, and nobody will tell you.** An agent that reconnects and s
 the answer has to send the task again. Re-sending the same `taskId` is safe — it replaces the
 old card rather than stacking a second one.
 
-## 8. Running the bridge
+## 8. Waiting for a person
+
+A question is not a tool call, and the difference is the human. Everything in this section
+exists because of that one fact: a tool call that blocks for five seconds is behaving, and a
+question that stays unanswered for five minutes is normal.
+
+The whole story is four frames.
+
+1. **`task` in, `ack` + `wait` out.** The call is confirmed in milliseconds, with how long an
+   answer usually takes and how often the canvas will check in. An agent knows immediately
+   whether a human is even looking (`queued` means nobody is).
+2. **`progress` while the card is up.** On the quoted interval, plus immediately whenever the
+   human touches the card, with the partial answer attached.
+3. **`event` when it lands** — the blocking half, resolved by the turning of the wait.
+4. **`answers` if the agent was not there for it.** The bridge keeps terminal events, so an
+   agent that stopped waiting can collect the answer later without re-asking the person.
+
+### What this means for an agent
+
+- **Waiting is normal, and the socket holds the wait for you.** `task()` blocks in the
+  client; an agent that prefers not to block on the call can end its turn and come back with
+  `waitFor(taskId)`, which resolves from what the bridge kept if the answer already landed.
+- **A deadline is not a withdrawal.** If a task times out, the card is still on screen and the
+  answer is still collectable. Withdrawing on a deadline would throw away work the human may
+  be halfway through.
+- **Use `progress` to decide whether to keep waiting.** `answering` means keep waiting —
+  somebody is there and mid-answer. A long run of `waiting` is the only evidence available
+  that nobody is at the desk.
+- **Do not poll `answers` in a tight loop.** It is for catching up after a turn of your own,
+  not for waiting. The live `event` and `progress` frames are the waiting.
+
+### How this compares to MCP
+
+Read this before designing a host around AuraUI, because the two protocols are aimed at the
+same problem.
+
+- **Progress notifications.** MCP has `notifications/progress`, keyed by a `progressToken` the
+  caller passes. AuraUI's `progress` does the same job, with the human's own words in it:
+  `signals` carries what they have picked so far, which is more than a generic percentage can
+  ever carry.
+- **Tasks.** Introduced in MCP `2025-11-25` and still marked experimental: a request can be
+  augmented with a task, the receiver immediately returns a handle (`taskId`, `status`,
+  `pollInterval`, `ttl`) instead of the result, and the requestor polls `tasks/get` and
+  retrieves the outcome with `tasks/result`, which blocks until terminal. Statuses are
+  `working`, `input_required`, `completed`, `failed`, `cancelled`. That is AuraUI's `ack` +
+  `wait` + `answers` in MCP's vocabulary. MCP's `CreateTaskResult` may also carry
+  `io.modelcontextprotocol/model-immediate-response` in `_meta` — a string the host passes to
+  the model *as an immediate tool result* while the task runs. That is the closest thing in
+  the standard to "confirm now, answer later", and it is host-side and provisional.
+- **Multi Round-Trip Requests** (MCP `2026-07-28`). A tool call can end its HTTP response with
+  `resultType: "input_required"`, `inputRequests` (a form elicitation with a JSON Schema) and
+  an opaque `requestState`. The client collects the answers and **re-issues the same tool
+  call** with `inputResponses` and the echoed `requestState`. A server may only solicit input
+  while it is handling a request it was sent, so nothing pops a dialog at a person
+  spontaneously.
+
+**The question this all leads to, and the honest answer:** there is still no standard way for
+a server to push text *into* a model's context. Every mechanism above works because the
+**host** re-invokes the tool, or the agent asks again — the answer travels back as a tool
+result on a call the client made, never as unsolicited prompt text. A local bridge like this
+one could hand an answer to a host that knows how to write into a running turn, but that is a
+host feature, not a protocol feature, and no MCP revision has made it standard.
+
+So AuraUI does both halves on purpose. The **live half**: an agent that is waiting is streamed
+the answer and the progress. The **off-line half**: an agent that stopped waiting asks again
+and collects what the person said meanwhile. The second half is why the bridge keeps an answer
+instead of dropping it when the socket that asked has gone.
+
+## 9. Running the bridge
 
 | Way | Command |
 | --- | --- |
@@ -634,6 +1176,6 @@ also reads `VITE_AURAUI_STT_URL` and `VITE_AURAUI_STT_MODEL` **at build time** f
 transcription; see the voice section under `WizardForm`. Leaving both unset is supported.
 
 Run `python3 examples/demo_agent.py` or `node examples/demo-agent.mjs` for a full walkthrough
-of all eight component kinds against a live bridge. Each card asks one question and most of
+of all thirteen component kinds against a live bridge. Each card asks one question and most of
 them are answered by a single press: the incident report is a run of single-question cards,
 and the patch is reviewed one hunk at a time.

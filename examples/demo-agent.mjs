@@ -2,10 +2,11 @@
 /**
  * AuraUI demo agent — the happy path, in one readable script.
  *
- * Walks a human through all eight AuraUI component kinds in turn: an ActionCard triage
+ * Walks a human through all thirteen AuraUI component kinds in turn: an ActionCard triage
  * choice, a short WizardForm/ActionCard incident interview, a DataGrid row pick, a
  * SortableList ordering, an InteractiveChart drill-down, a RatingScale confidence check,
- * a per-hunk DiffReview, and a closing Notice. Every answer is printed as it arrives, so
+ * a per-hunk DiffReview, a RegionMark drawing on a picture, a PairMatrix, an AllocateBudget, and
+ * a closing Notice. Every answer is printed as it arrives, so
  * the script doubles as a smoke test of the whole loop.
  *
  * Every card asks exactly one question. AuraUI shows one question at a time, so a card that
@@ -82,6 +83,37 @@ const REVENUE_SPEC = {
 
 // The patch the agent wants reviewed. The agent splits its own diff into hunks and marks
 // every line; AuraUI renders what it is handed and never computes a diff itself.
+/**
+ * The picture the RegionMark question draws on.
+ *
+ * An SVG string rather than a PNG file, passed through `c.imageData` so the whole thing travels
+ * inside the question. That is the rule it demonstrates: an agent with a screenshot in hand
+ * sends the bytes, and the canvas never goes and fetches an address on somebody else's behalf.
+ */
+const DASHBOARD_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="960" height="600" viewBox="0 0 960 600">
+  <rect width="960" height="600" fill="#0b1220"/>
+  <rect x="24" y="24" width="912" height="52" rx="8" fill="#111c30" stroke="#1e293b"/>
+  <text x="44" y="56" fill="#94a3b8" font-family="sans-serif" font-size="17">staging / checkout</text>
+  <text x="780" y="56" fill="#f59e0b" font-family="sans-serif" font-size="17">degraded</text>
+  <rect x="24" y="96" width="288" height="168" rx="10" fill="#111c30" stroke="#1e293b"/>
+  <text x="44" y="128" fill="#64748b" font-family="sans-serif" font-size="14">p95 latency</text>
+  <text x="44" y="176" fill="#e2e8f0" font-family="sans-serif" font-size="34">412ms</text>
+  <text x="44" y="204" fill="#f87171" font-family="sans-serif" font-size="14">+318% vs median</text>
+  <rect x="336" y="96" width="288" height="168" rx="10" fill="#111c30" stroke="#1e293b"/>
+  <text x="356" y="128" fill="#64748b" font-family="sans-serif" font-size="14">charge success</text>
+  <text x="356" y="176" fill="#e2e8f0" font-family="sans-serif" font-size="34">98.4%</text>
+  <text x="356" y="204" fill="#34d399" font-family="sans-serif" font-size="14">steady</text>
+  <rect x="648" y="96" width="288" height="168" rx="10" fill="#111c30" stroke="#1e293b"/>
+  <text x="668" y="128" fill="#64748b" font-family="sans-serif" font-size="14">error rate</text>
+  <text x="668" y="176" fill="#e2e8f0" font-family="sans-serif" font-size="34">6.1%</text>
+  <text x="668" y="204" fill="#f87171" font-family="sans-serif" font-size="14">climbing</text>
+  <rect x="24" y="288" width="912" height="288" rx="10" fill="#111c30" stroke="#1e293b"/>
+  <text x="44" y="320" fill="#64748b" font-family="sans-serif" font-size="14">requests per minute, last hour</text>
+  <polyline points="44,530 120,522 196,506 272,470 348,412 424,350 500,392 576,428 652,470 728,498 804,512 880,520" fill="none" stroke="#38bdf8" stroke-width="3"/>
+  <line x1="272" y1="348" x2="272" y2="556" stroke="#334155" stroke-width="1"/>
+  <text x="272" y="344" fill="#64748b" font-family="sans-serif" font-size="12" text-anchor="middle">deploy 2026.10.4</text>
+</svg>`;
+
 const PATCH_HUNKS = [
   c.diffHunk(
     "reducer-guard",
@@ -349,7 +381,155 @@ async function run(agent) {
   console.log(`  (review: ${accepted.length} accepted, ${rejected.length} rejected)`);
   console.log();
 
-  // 8. Notice ------------------------------------------------------------
+  // 8. RegionMark --------------------------------------------------------
+  // "Show me where it is wrong." The agent already has the picture — it took the screenshot
+  // itself — so the bytes travel with the question, and what comes back is the drawing: boxes,
+  // circles, arrows, Xs and freehand lines, as fractions of the picture rather than pixels on
+  // somebody's monitor.
+  const marked = await ask(agent, "RegionMark drawing on the staging dashboard", {
+    component: "RegionMark",
+    instruction:
+      "Circle the panel that looks wrong, and point at anything worth reading from it. " +
+      "Draw as much as you need.",
+    props: c.regionMark(c.imageData(DASHBOARD_SVG, "image/svg+xml"), {
+      width: 960,
+      height: 600,
+      alt:
+        "staging checkout dashboard: p95 latency 412ms, charge success 98.4%, error rate 6.1%, " +
+        "and a request-rate chart",
+      label: "staging / checkout, 960x600",
+      help: "Pick a pen and draw. Backspace takes back the last mark.",
+    }),
+  });
+  const shapes = marked.payload?.shapes ?? [];
+  const shapeNames = { rect: "box", ellipse: "circle", arrow: "arrow", cross: "X", path: "line" };
+  const drawn = shapes.map((shape) => shapeNames[shape.kind] ?? "mark").join(", ") || "nothing";
+  agent.note(`Drawing received: ${shapes.length} mark(s) — ${drawn}.`, "meta");
+  console.log();
+
+  // 9. PairMatrix --------------------------------------------------------
+  const paired = await ask(agent, `PairMatrix ${ANOMALIES.length} failing runs to a team`, {
+    component: "PairMatrix",
+    instruction:
+      "Put each failing run with the team that should hear about it first. The press that " +
+      "places the last one sends the lot.",
+    props: c.pairMatrix(
+      ANOMALIES.slice(0, 3).map((row) =>
+        c.pairRow(row.id, `${row.service} — ${row.window}`, {
+          description: `p99 ${row.p99_ms} ms, ${row.error_rate}% errors`,
+        }),
+      ),
+      [
+        c.pairOption("checkout", "Checkout team"),
+        c.pairOption("payments", "Payments team"),
+        c.pairOption("platform", "Platform team"),
+      ],
+      {
+        help: "Every row needs a home; the last press is the answer, so there is no button after it.",
+      },
+    ),
+  });
+  const pairs = paired.payload?.pairs ?? {};
+  agent.note(`Routing: ${JSON.stringify(pairs)}.`, "meta");
+  console.log();
+
+  // 10. AllocateBudget ---------------------------------------------------
+  const budget = await ask(agent, "AllocateBudget 40 minutes of verification", {
+    component: "AllocateBudget",
+    instruction:
+      "I have 40 minutes of verification budget before the next deploy window. Where should it go?",
+    props: c.allocateBudget(
+      [
+        c.allocationItem("repro", "Reproduce the slow checkout"),
+        c.allocationItem("bisect", "Bisect the cart reducer"),
+        c.allocationItem("load", "Load-test the charge path"),
+        c.allocationItem("docs", "Write up what we found"),
+      ],
+      40,
+      { step: 5, help: "It has to add up to 40 before I can take it." },
+    ),
+  });
+  const split = budget.payload?.allocations ?? {};
+  agent.note(`Budget taken: ${JSON.stringify(split)}.`, "meta");
+  console.log();
+
+  // 11. WebTask ----------------------------------------------------------
+  // The first kind here that is not answered by pressing something: the human works through
+  // pages on the web and reports back what happened on each one.
+  const delegated = await ask(agent, "WebTask: three errands on the web", {
+    component: "WebTask",
+    instruction:
+      "Three errands, and none of them is something I can do for you: each one needs a person " +
+      "on the other end.",
+    props: c.webTask(
+      [
+        c.webTaskItem("renew-insurance", "Renew the car insurance", "https://example.com/insurance/renew/8842", {
+          note: "The quote is already at step three. Take the 12-month term, not the 6-month one.",
+          done: "a policy number is on the screen",
+        }),
+        c.webTaskItem("pay-invoice", "Pay the hosting invoice", "https://example.com/billing/invoices/2291", {
+          done: "the invoice shows as paid",
+        }),
+        c.webTaskItem("book-slot", "Book the delivery slot", "https://example.com/deliveries/slots", {
+          done: "a slot is confirmed",
+          optional: true,
+        }),
+      ],
+      {
+        title: "Three stops, in any order",
+        intro:
+          "Each row says what finished looks like, and every one has somewhere to write down " +
+          "what happened.",
+        returnFiles: true,
+        allowSkip: true,
+      },
+    ),
+  });
+  const rows = delegated.payload?.tasks ?? [];
+  const doneRows = rows.filter((row) => row.status === "done").map((row) => row.id);
+  const skippedRows = rows.filter((row) => row.status === "skipped").map((row) => row.id);
+  agent.note(
+    `List back: ${doneRows.length} of ${rows.length} done` +
+      (skippedRows.length > 0 ? `, skipped ${skippedRows.join(", ")}` : "") +
+      ".",
+    "result",
+  );
+  for (const row of rows) {
+    if (row.note) agent.note(`  ${row.id}: ${row.note}`, "meta");
+  }
+  console.log();
+
+  // 12. ESign ------------------------------------------------------------
+  // The provider shape: a signing page, opened in the embedded browser, with the finished file
+  // attached back. The other shape — an agent-supplied PDF filled and signed inside the canvas —
+  // is the same component with `document` instead of `url`.
+  const signed = await ask(agent, "ESign: the lease renewal", {
+    component: "ESign",
+    instruction:
+      "The lease renewal needs your signature before the end of the month. The provider is " +
+      "expecting you.",
+    props: c.esign({
+      // A real provider link is a long-lived URL issued by the provider's own portal; this one is
+      // a stand-in so the walkthrough needs no account anywhere.
+      url: "https://example.com/lease-renewal/8821",
+      title: "Residential lease renewal",
+      intro:
+        "The term is unchanged from last year. Sign it there, then attach the copy it gives you " +
+        "and I will file it with the rest.",
+      returnSignedCopy: true,
+      submitLabel: "Send the signed copy",
+    }),
+  });
+  const returned = signed.payload?.document ?? null;
+  agent.note(
+    returned
+      ? `Signing confirmed, with ${returned.filename} (${returned.size} bytes) attached.`
+      : "Signing confirmed, with no copy attached.",
+    "result",
+  );
+  console.log();
+
+  // 13. Notice -----------------------------------------------------------
   const closed = await ask(agent, "Notice success with a closing action", {
     component: "Notice",
     props: c.notice("success", {
@@ -364,6 +544,10 @@ async function run(agent) {
         `Drill-down: ${region}`,
         `Confidence: ${confidence}/5 (${confidenceWord})`,
         `Patch: ${accepted.length} hunks accepted, ${rejected.length} rejected`,
+        `Marks on the dashboard: ${shapes.length} (${drawn})`,
+        `Routed ${Object.keys(pairs).length} failing runs to a team`,
+        `Verification budget: ${Object.values(split).reduce((sum, n) => sum + n, 0)}/40 ` +
+          `minutes across ${Object.keys(split).length} lines`,
       ],
       actions: [c.option("done", "Close the loop", { variant: "primary" })],
     }),
@@ -375,7 +559,6 @@ async function run(agent) {
   console.log(`Closing action: ${closed.payload?.actionId}`);
   console.log();
 
-  agent.notify("info", "Demo complete.");
   agent.note("Demo complete.", "result");
   console.log("Demo complete.");
 }

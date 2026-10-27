@@ -1,0 +1,87 @@
+# Publishes the phone app.
+#
+# The desktop app is installed from a release; the phone app cannot be. A service worker and the
+# Push API both require a secure context, and a phone reaching a laptop over a LAN address is
+# not one — `http://192.168.1.4:1420` has no `navigator.serviceWorker` at all. GitHub Pages is
+# HTTPS for free, which is the entire reason the PWA lives here rather than inside the desktop
+# binary. See docs/PWA-REMOTE.md for the rest of that argument.
+#
+# Only `dist-pwa` is uploaded: the desktop bundle, the Rust crate and the agent clients have no
+# business on a public origin.
+name: Publish the phone app
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "pwa/**"
+      - "src/**"
+      - "vite.config.pwa.ts"
+      - "tailwind.config.js"
+      - "postcss.config.js"
+      - "package.json"
+      - "package-lock.json"
+      - "tsconfig.json"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Never race two publishes at one URL. `cancel-in-progress: false` because a Pages deployment
+# that is interrupted mid-flight leaves the site serving the previous build, which is fine, and
+# cancelling a queued one is not worth the risk of a half-published directory.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build the phone app
+        run: npm run build:pwa
+
+      - name: Check the build is a usable PWA
+        # A bundle that builds is not a phone app. These three files are what make it installable
+        # and wakable, so a build that drops one fails here rather than on someone's device.
+        run: |
+          set -euo pipefail
+          test -f dist-pwa/index.html
+          test -f dist-pwa/sw.js
+          test -f dist-pwa/manifest.webmanifest
+          test -f dist-pwa/icon-512.png
+          # The service worker has to be at the scope root, or notifications arrive for a
+          # page the worker does not control.
+          grep -q '"start_url": "."' dist-pwa/manifest.webmanifest
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist-pwa
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

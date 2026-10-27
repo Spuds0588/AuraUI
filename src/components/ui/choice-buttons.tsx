@@ -1,4 +1,5 @@
 import { cn } from "@/lib/utils";
+import KeyHint from "./key-hint";
 import { toneClassesAt } from "./tones";
 
 /**
@@ -42,6 +43,14 @@ export interface ChoiceButtonsProps {
   disabled?: boolean;
   /** Names the group for assistive tech. Defaults to the option list being unlabelled. */
   ariaLabel?: string;
+  /**
+   * The key that picks each option, positionally.
+   *
+   * Passed in rather than derived, because the caller owns the binding (see `@/lib/keyboard`)
+   * and this control has no way of knowing whether its keys are already spoken for by a field
+   * further up the card.
+   */
+  keyHints?: string[];
   className?: string;
 }
 
@@ -51,6 +60,7 @@ export default function ChoiceButtons({
   onToggle,
   disabled = false,
   ariaLabel,
+  keyHints,
   className,
 }: ChoiceButtonsProps) {
   return (
@@ -90,6 +100,7 @@ export default function ChoiceButtons({
                 </span>
               ) : null}
             </span>
+            <KeyHint keys={keyHints?.[index]} className="ml-auto self-start" />
           </button>
         );
       })}

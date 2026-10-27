@@ -8,13 +8,12 @@ import {
   applyWelcome,
   clearOrphaned,
   createInitialState,
-  dismissNotice,
   dismissTask,
   expireOrphaned,
   markOrphaned,
 } from "./canvasStore";
 import { DEMO_AGENT_IDENTITY, demoOpening, demoReply, type DemoFrame } from "./demoScript";
-import { type AgentFrame, type CanvasState, type EventName } from "./protocol";
+import type { AgentFrame, CanvasState, EventName, Signal, WaitState } from "./protocol";
 
 /**
  * The canvas side of the bridge.
@@ -23,7 +22,9 @@ import { type AgentFrame, type CanvasState, type EventName } from "./protocol";
  *  - **desktop** — inside the Tauri shell. Agent frames arrive as `auraui://frame` events
  *    from the Rust bridge and answers go back through the `auraui_emit` command.
  *  - **demo** — a plain browser (`npm run dev`) with no Rust and no agent. A scripted agent
- *    walks through all eight component kinds so the renderer is still workable.
+ *    walks through all thirteen component kinds so the renderer is still workable — including the
+ *    two delegated kinds, which degrade to open-in-your-browser here because a page in a browser
+ *    tab cannot hand a session to an embedded view.
  *
  * The store is transport-agnostic; only this file knows the difference.
  */
@@ -176,9 +177,28 @@ export function useCanvas() {
     setState((current) => dismissTask(current, taskId));
   }, []);
 
-  const dismissToast = useCallback((id: string) => {
-    setState((current) => dismissNotice(current, id));
-  }, []);
+  /**
+   * Check in on a question that is still unanswered.
+   *
+   * The webview owns the clock and knows whether anyone has touched the card; the bridge owns
+   * the socket, the estimate and the `at` stamp. So this sends the facts and lets the bridge
+   * build the frame. Failures are logged and nothing else: a missed check-in must never take
+   * a question off the screen.
+   */
+  const emitProgress = useCallback(
+    (input: { taskId: string; phase: WaitState; elapsedMs: number; signals: Signal[] }) => {
+      if (mode !== "desktop") return;
+      void invoke("auraui_progress", {
+        taskId: input.taskId,
+        phase: input.phase,
+        elapsedMs: input.elapsedMs,
+        signals: input.signals,
+      }).catch((error) =>
+        console.warn("[auraui] could not report progress to the bridge:", error),
+      );
+    },
+    [mode],
+  );
 
   /*
    * Questions with nobody left to answer them.
@@ -208,7 +228,7 @@ export function useCanvas() {
     fatal,
     respond,
     dismiss,
-    dismissToast,
+    emitProgress,
   } as const;
 }
 

@@ -32,6 +32,7 @@ from ._ws import ConnectionClosed, HandshakeError, RawWebSocket, WebSocketError
 from .protocol import (
     DEFAULT_URL,
     MAX_FRAME_BYTES,
+    RUN_LIMIT,
     TERMINAL_EVENTS,
     AuraUIError,
     ConnectionLost,
@@ -53,7 +54,8 @@ class _Pending:
 
     def __init__(self) -> None:
         self.done = threading.Event()
-        self.result: Optional[Dict[str, Any]] = None
+        # Either one answer or a list of them: both `task()` and the `answers` read wait here.
+        self.result: Any = None
         self.error: Optional[BaseException] = None
         self.signals: List[Dict[str, Any]] = []
 
@@ -110,6 +112,10 @@ class Agent:
 
         self._pending: Dict[str, _Pending] = {}
         self._pending_lock = threading.Lock()
+        # A single in-flight `answers` read, resolved by the bridge's reply. One at a time,
+        # because the reply carries no id to match it back to a caller.
+        self._answers_waiter: Optional[_Pending] = None
+        self._answers_lock = threading.Lock()
         self._handlers: Dict[str, List[Handler]] = {}
 
     # -- state --------------------------------------------------------
@@ -369,12 +375,230 @@ class Agent:
         if not pending.done.wait(timeout):
             with self._pending_lock:
                 self._pending.pop(task_id, None)
-            raise TaskTimeout(f'No answer for task "{task_id}" within {timeout}s.')
+            # A deadline is not a withdrawal: the card is still on screen and the bridge still
+            # keeps the answer, so the message says where to find it.
+            raise TaskTimeout(
+                f'No answer for task "{task_id}" within {timeout}s. The question is still on '
+                f'screen; call wait_for("{task_id}") or answers(["{task_id}"]) to collect the '
+                "answer if the human gave one."
+            )
 
         if pending.error is not None:
             raise pending.error
         assert pending.result is not None
         return pending.result
+
+    def answers(
+        self,
+        task_ids: Optional[Sequence[str]] = None,
+        timeout: float = 5.0,
+    ) -> List[Dict[str, Any]]:
+        """Ask the bridge for answers it kept on this session's behalf.
+
+        The one thing a blocking call cannot answer for itself: what did the human say while
+        this agent was not waiting? AuraUI keeps every terminal event for ten minutes, so an
+        agent that hit its own deadline, or one that was restarted mid-question, can come back
+        and collect the answer instead of asking the person to answer twice.
+
+        :param task_ids: Only these tasks. ``None`` asks for everything kept.
+        :param timeout: Seconds to wait for the reply.
+        :returns: A list of ``{"taskId", "event", "payload", "seq", "at"}`` dicts.
+        :raises TaskTimeout: If the bridge does not reply in time.
+        """
+        if task_ids is not None and not isinstance(task_ids, (list, tuple)):
+            raise ValueError("answers() takes a list of task ids, or None for all of them.")
+        self._await_connection()
+
+        waiter = _Pending()
+        with self._answers_lock:
+            if self._answers_waiter is not None:
+                raise RuntimeError("An answers() request is already in flight; await it first.")
+            self._answers_waiter = waiter
+
+        try:
+            self._send(
+                "answers",
+                taskIds=[str(task_id) for task_id in task_ids] if task_ids else None,
+            )
+        except BaseException:
+            with self._answers_lock:
+                self._answers_waiter = None
+            raise
+
+        if not waiter.done.wait(timeout):
+            with self._answers_lock:
+                self._answers_waiter = None
+            raise TaskTimeout(f"AuraUI did not answer the answers request within {timeout}s.")
+        if waiter.error is not None:
+            raise waiter.error
+        return list(waiter.result or [])
+
+    def wait_for(self, task_id: str, timeout: Optional[float] = None) -> Dict[str, Any]:
+        """Keep waiting on a question this call did not wait for.
+
+        Resolves from what the bridge kept when the human has since answered — after a
+        ``task()`` gave up, or after a restart that lost the in-flight wait — and otherwise
+        watches the socket for the terminal event exactly as :meth:`task` would have. This is
+        how an agent hands a wait back to the framework instead of sleeping on its own thread.
+
+        :param task_id: The task to watch.
+        :param timeout: Seconds to wait. Waits indefinitely by default.
+        :returns: ``{"taskId", "event", "payload", "seq", "at"}``.
+        """
+        if not task_id:
+            raise ValueError("wait_for() needs a task_id.")
+        self._await_connection()
+
+        for item in self.answers([task_id]):
+            if item.get("taskId") == task_id:
+                return {
+                    "taskId": item.get("taskId"),
+                    "event": item.get("event"),
+                    "payload": item.get("payload") or {},
+                    "seq": item.get("seq"),
+                    "at": item.get("at"),
+                }
+
+        pending = _Pending()
+        with self._pending_lock:
+            if task_id in self._pending:
+                raise ValueError(f'Task "{task_id}" is already being waited on by this client.')
+            self._pending[task_id] = pending
+
+        if not pending.done.wait(timeout):
+            with self._pending_lock:
+                self._pending.pop(task_id, None)
+            raise TaskTimeout(
+                f'Task "{task_id}" is still unanswered after {timeout}s. Nothing was withdrawn; '
+                "wait_for() again when you are ready to look."
+            )
+        if pending.error is not None:
+            raise pending.error
+        return pending.result
+
+    def ask_many(
+        self,
+        questions: Sequence[Dict[str, Any]],
+        run_id: Optional[str] = None,
+        instruction: Optional[str] = None,
+        timeout: Optional[float] = None,
+    ) -> List[Dict[str, Any]]:
+        """Ask several questions in one call, and get every answer back together.
+
+        The reason this exists is how agents actually behave: an agent with four independent
+        things to ask will fan them out as four calls, and the human then works through four
+        cards that nothing ties together. A run is that same fan-out as one request — the
+        canvas draws each question as its own card, still one press each, but they arrive as a
+        set ("Question 2 of 4") and this returns once, with every answer.
+
+        Use it when you already know every question you need. Split back into separate
+        :meth:`task` calls at the point where question n+1 depends on the answer to question n.
+
+        :param questions: One dict per question, in the order the human should be asked:
+            ``{"id", "component", "props", "instruction"?, "urgent"?}``. The ``id`` is that
+            question's task id, and is what :meth:`resolve`, :meth:`wait_for` and
+            :meth:`answers` name.
+        :param run_id: Groups this set in the logs; generated when omitted.
+        :param instruction: One sentence for the whole set, drawn on every card of it.
+        :param timeout: Seconds to wait *per question*. Waits indefinitely by default.
+        :returns: The answers, in the order asked.
+        :raises TaskTimeout: If a question outlives ``timeout``.
+        """
+        if not isinstance(questions, (list, tuple)) or not questions:
+            raise ValueError("ask_many() needs a non-empty list of questions.")
+        if len(questions) > RUN_LIMIT:
+            raise ValueError(
+                f"ask_many() carries {len(questions)} questions; a run asks at most {RUN_LIMIT}. "
+                "Split it, or use one WizardForm when the questions are fields of a single thing."
+            )
+
+        ids: List[str] = []
+        for question in questions:
+            if not isinstance(question, dict):
+                raise ValueError("every question must be a dict.")
+            question_id = question.get("id")
+            component = question.get("component")
+            props = question.get("props")
+            if not isinstance(question_id, str) or not question_id:
+                raise ValueError("every question needs a non-empty `id`.")
+            if not isinstance(component, str) or not component:
+                raise ValueError(f'question "{question_id}" needs a non-empty `component`.')
+            if not isinstance(props, dict):
+                raise ValueError(
+                    f'question "{question_id}" needs a props dict built with the components helpers.'
+                )
+            if question_id in ids:
+                raise ValueError(
+                    f'Duplicate question id "{question_id}" in one run; each id is a task id.'
+                )
+            ids.append(question_id)
+
+        run_id = run_id or new_task_id()
+        self._await_connection()
+
+        with self._pending_lock:
+            for question_id in ids:
+                if question_id in self._pending:
+                    raise ValueError(
+                        f'Question id "{question_id}" is already awaiting an answer on this client.'
+                    )
+            # Registered before the frame goes out, so no answer can land while a question is
+            # unknown to this client and be thrown away as an orphan.
+            pending = {question_id: _Pending() for question_id in ids}
+            self._pending.update(pending)
+
+        try:
+            self._send(
+                "run",
+                runId=run_id,
+                instruction=instruction,
+                questions=[
+                    {
+                        "id": question["id"],
+                        "component": question["component"],
+                        "instruction": question.get("instruction"),
+                        "props": question["props"],
+                        "urgent": True if question.get("urgent") else None,
+                    }
+                    for question in questions
+                ],
+            )
+        except BaseException:
+            self._fail_many(pending, ConnectionLost("The run could not be sent."))
+            raise
+
+        # The canvas answers first asked first answered, so waiting in order is both correct
+        # and the cheapest thing to do — no wake-ups for a question that cannot be answered yet.
+        answers: List[Dict[str, Any]] = []
+        try:
+            for question_id in ids:
+                waiter = pending[question_id]
+                if not waiter.done.wait(timeout):
+                    raise TaskTimeout(
+                        f'No answer for question "{question_id}" within {timeout}s. The questions '
+                        "are still on screen; wait_for() or answers() will collect them later."
+                    )
+                if waiter.error is not None:
+                    raise waiter.error
+                answers.append(waiter.result)
+        except BaseException:
+            # A failure on one question must not leave the rest registered: an answer to a
+            # question nobody is waiting for would only be logged as an orphan.
+            self._fail_many(pending, ConnectionLost("The run stopped waiting."))
+            raise
+
+        return answers
+
+    def _fail_many(self, pending: Dict[str, "_Pending"], error: BaseException) -> None:
+        """Drop and fail a whole run's waiters, leaving any already answered alone."""
+        with self._pending_lock:
+            remaining = [
+                item
+                for key, item in pending.items()
+                if self._pending.pop(key, None) is not None
+            ]
+        for item in remaining:
+            item.fail(error)
 
     def resolve(self, task_id: str, reason: Optional[str] = None) -> None:
         """Withdraw a task before the human answers it."""
@@ -385,14 +609,6 @@ class Agent:
             pending = self._pending.pop(task_id, None)
         if pending is not None:
             pending.fail(ConnectionLost(f'Task "{task_id}" was withdrawn by the agent.'))
-
-    def notify(self, level: str, message: str) -> None:
-        """Queue a transient toast in the AuraUI window. Does not expect a reply."""
-        from .protocol import NOTICE_LEVELS
-
-        if level not in NOTICE_LEVELS:
-            raise ValueError(f"notify level must be one of {', '.join(NOTICE_LEVELS)}.")
-        self._send("notify", level=level, message=message)
 
     def note(self, text: str, kind: str = "meta") -> None:
         """Narrate what the agent is doing, in one line.
@@ -440,6 +656,34 @@ class Agent:
 
         if kind == "ack":
             self._report("ack", message)
+            return
+
+        if kind == "progress":
+            # A check-in on a question nobody has answered yet: how long it has been whether
+            # the human has touched it, and whatever they have said on it so far.
+            self._report(
+                "progress",
+                {
+                    "taskId": message.get("taskId"),
+                    "state": message.get("state"),
+                    "elapsedMs": message.get("elapsedMs"),
+                    "estimatedMs": message.get("estimatedMs"),
+                    "remainingMs": message.get("remainingMs"),
+                    "signals": message.get("signals") or [],
+                    "at": message.get("at"),
+                },
+            )
+            return
+
+        if kind == "answers":
+            items = message.get("items")
+            items = items if isinstance(items, list) else []
+            self._report("answers", items)
+            with self._answers_lock:
+                waiter = self._answers_waiter
+                self._answers_waiter = None
+            if waiter is not None:
+                waiter.resolve(items)
             return
 
         if kind == "error":
@@ -516,6 +760,14 @@ class Agent:
         with self._pending_lock:
             pendings = list(self._pending.values())
             self._pending.clear()
+        # An `answers` read is waiting on the same socket, so it dies with it. Failing rather
+        # than answering "nothing kept": an empty list would read as "the human said
+        # nothing", when what it means is that we could not ask.
+        with self._answers_lock:
+            waiter = self._answers_waiter
+            self._answers_waiter = None
+        if waiter is not None:
+            waiter.fail(error)
         for pending in pendings:
             pending.fail(error)
 
@@ -563,6 +815,15 @@ class Agent:
     def on_ack(self, handler: Handler) -> Handler:
         """Called with each ``ack`` frame AuraUI sends for a task."""
         return self.on("ack", handler)
+
+    def on_progress(self, handler: Handler) -> Handler:
+        """Called with each check-in on a question that is still unanswered.
+
+        ``{"taskId", "state", "elapsedMs", "estimatedMs", "remainingMs", "signals", "at"}``,
+        where ``state`` is ``waiting`` until the human touches the card and ``answering``
+        after, and ``signals`` carries their partial answer newest first.
+        """
+        return self.on("progress", handler)
 
     def on_error(self, handler: Handler) -> Handler:
         """Called with an error, either a transport error or AuraUI's ``error`` frame."""
