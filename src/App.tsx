@@ -3,8 +3,10 @@ import { invoke } from "@tauri-apps/api/core";
 import { AlertTriangle } from "lucide-react";
 import IdlePill from "@/components/IdlePill";
 import TaskFrame from "@/components/TaskFrame";
+import { rendererFor } from "@/components/renderer/registry";
 import { isTauri, useCanvas } from "@/lib/bridge";
 import { latestNote, questionQueue, secondsUntilExpiry } from "@/lib/canvasStore";
+import { setActiveWebTask } from "@/lib/webview";
 import type { LiveTask, Signal } from "@/lib/protocol";
 import { cn } from "@/lib/utils";
 
@@ -374,6 +376,25 @@ export default function App() {
     );
   }, [showOverlay]);
 
+  /*
+   * Which card owns the embedded browser.
+   *
+   * A delegated web task draws a real page as a native layer inside this window, and that layer is
+   * not part of the DOM: it cannot be animated, clipped or hidden by the card. So the decision
+   * about who may show one is made here, where it is known which card is actually in front, and
+   * never by the card itself — `App` also renders a copy of a card while it leaves, and a leaving
+   * copy that could hide the page would blank it mid-handoff.
+   */
+  useEffect(() => {
+    const available = current && !current.resolved && current.orphanedAt === undefined;
+    setActiveWebTask(available ? current.frame.taskId : undefined);
+  }, [current]);
+
+  // Delegated web tasks and signature requests bring a page or a document with them, and neither
+  // fits in the width of a question. Everything else keeps the narrow column it was designed for.
+  const onScreen = (current ?? exiting?.task)?.frame.component;
+  const wide = onScreen ? rendererFor(onScreen)?.wide === true : false;
+
   const idlePill = (
     <IdlePill
       mode={mode}
@@ -414,7 +435,7 @@ export default function App() {
       />
 
       <div className="relative z-10 flex h-full w-full items-center justify-center overflow-y-auto p-10">
-        <div className="relative w-full max-w-2xl">
+        <div className={cn("relative w-full", wide ? "max-w-5xl" : "max-w-2xl")}>
           {fatal ? <FatalCard message={fatal} /> : null}
 
           {/*

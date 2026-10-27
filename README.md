@@ -40,7 +40,7 @@ part of answering the question in front of you, it is not there.
 
 ## What v1 does
 
-Eleven component kinds, all verified end to end:
+Thirteen component kinds, all verified end to end:
 
 | Component | The question it asks | Event back |
 | --- | --- | --- |
@@ -55,6 +55,8 @@ Eleven component kinds, all verified end to end:
 | `RegionMark` | Draw on the picture you were sent: boxes, circles, arrows, Xs, freehand | `submit` |
 | `PairMatrix` | Send each item to the option it belongs to | `submit` |
 | `AllocateBudget` | Split a total across lines, and make it add up | `submit` |
+| `WebTask` | Go and do this — one page, or a list of them | `submit` |
+| `ESign` | Read this and sign it | `submit` |
 
 Choosing is always a button. There is deliberately no checkbox, radio button or dropdown
 anywhere in the canvas, and the bridge refuses a chart spec that would draw one.
@@ -65,6 +67,16 @@ And choosing is *one* button. The press that makes a choice is the answer — `A
 drawing and a split of a total keep a button, because a mark and an arithmetic are the two
 things here that are easier to get wrong than to say. A button asking you to confirm the thing you
 just clicked turns one decision into two, so there is not one.
+
+The two components that hand work *over* instead of asking about it — `WebTask` and `ESign` —
+keep a button, for the opposite reason: a page watched until it says done is a job you come back
+from, and the moment you come back is yours to pick. `WebTask` takes one URL or a list of them,
+each with the agent's own sentence for what finished looks like, and sends per-item progress as it
+goes so an agent waiting on a long list knows where the books stand. `ESign` takes a provider link
+or a PDF the agent supplies, renders it in the card, and hands back the signed bytes. Both can
+carry a session — cookies and per-origin storage — into an embedded browser so the human resumes
+mid-flow instead of logging in again. [WEBTASK-SESSION.md](docs/WEBTASK-SESSION.md) argues for the
+embedded browser and says plainly what a passed session can and cannot do.
 
 Plus `note` for narration and `ack` so an agent always knows whether a window is actually
 showing its question (`rendered`) or nobody is looking (`queued`).
@@ -120,7 +132,7 @@ python3 examples/demo_agent.py     # standard library only, nothing to install
 node examples/demo-agent.mjs       # uses the optional `ws` package (already installed)
 ```
 
-Both scripts walk the human through all eleven components and print every exchange. Each
+Both scripts walk the human through all thirteen components and print every exchange. Each
 card asks one question, so the incident report is a short interview and the patch is
 reviewed one hunk at a time.
 
@@ -191,6 +203,7 @@ The full frame reference, every prop shape and the error codes are in
 | `pwa/` | The phone app: its own shell, service worker and manifest, over the same components |
 | `docs/PROTOCOL.md` | The wire contract. Read this before writing an agent. |
 | `docs/PWA-REMOTE.md` | Design note: pairing, the peer link, and waking a sleeping phone |
+| `docs/WEBTASK-SESSION.md` | Design note: the embedded browser, passed sessions, and their limits |
 | `docs/REMOTE-AND-MOBILE.md` | Earlier design note: how the phone options were weighed |
 
 The contract lives in three places that must agree: `docs/PROTOCOL.md`,
@@ -198,9 +211,11 @@ The contract lives in three places that must agree: `docs/PROTOCOL.md`,
 
 ## The phone
 
-The canvas is not only an overlay. The same eleven components, the same protocol and the same
+The canvas is not only an overlay. The same thirteen components, the same protocol and the same
 registry also build into an installable phone app, so a question that arrives while the human is
-away from their desk is answered from a pocket instead of waiting.
+away from their desk is answered from a pocket instead of waiting. The two that need an embedded
+browser degrade there instead of failing: the same queue, the same notes, and every link opens in
+the phone's own browser, which is the one browser it already has a session in.
 
 The desktop draws a QR code; the phone scans it once with the camera; from then on that phone is
 paired. The code carries the desktop's peer id, a shared secret, and the desktop's push key, so
@@ -244,9 +259,12 @@ python3 examples/demo_agent.py --once --step-timeout 20
 
 ## Not in v1
 
-The PRD's Milestone 3 — commanding a webview, recording user workflows as DOM telemetry, and
-tldraw snapshot redlining — is not built. Those need a real Tauri window and native capture,
-and they are the next milestone rather than a stub.
+The PRD's Milestone 3 asked for commanding a webview, recording user workflows as DOM telemetry,
+and tldraw snapshot redlining. The first of those is now half built, in the narrowest form that
+was useful: an embedded webview the *human* drives, opened by the agent and closed when they send
+their answer. Nothing in the canvas clicks, types or submits inside it, no page content is read
+back out, and no workflow is recorded. Driving the view from the agent side, DOM telemetry and
+tldraw redlining remain the rest of that milestone rather than a stub.
 
 The phone app exists and is paired by hand, but the desktop half of the pairing is not wired up
 yet: it cannot yet draw the QR, does not persist its peer identity or push keys, cannot send a
@@ -260,6 +278,15 @@ The bridge is **loopback only** and has no authentication: anything that can ope
 `127.0.0.1:9090` on this machine can put a card in front of the human. That is local-machine
 trust, the same as a terminal. The canvas renders declarative props only — agents cannot
 inject HTML, CSS or JavaScript.
+
+`WebTask` and `ESign` add one surface that is not declarative: an embedded browser showing a site
+the agent named. Two things hold the line there. The app's IPC is locked to the canvas webview by
+label — in the capability file and again in every command's caller check — so a page inside the
+app can reach neither the bridge nor the shell's commands. And a session is only ever injected
+after the human is told, per origin, which site is asking and how much of their sign-in comes with
+it. What that does and does not protect against is set out in
+[WEBTASK-SESSION.md](docs/WEBTASK-SESSION.md); the short version is that the human's judgement
+about the site is still the load-bearing part, so the card shows the host in its own pixels.
 
 A paired phone is a second door, and it is locked differently. It presents a 128-bit token from
 the QR, compared without an early exit; a socket that does not present it within ten seconds is

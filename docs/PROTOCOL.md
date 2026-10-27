@@ -108,7 +108,7 @@ Only `agent.name` is required.
 | Field | Required | Meaning |
 | --- | --- | --- |
 | `taskId` | yes | Non-empty. Re-sending it replaces the card on the canvas. |
-| `component` | yes | One of the eleven kinds in §4. |
+| `component` | yes | One of the thirteen kinds in §4. |
 | `props` | yes | Renderer payload, shapes in §4. |
 | `instruction` | no | One or two sentences aimed at the human, drawn above the card. |
 | `urgent` | no | Adds an accent border and a "needs you" chip. Not colour alone. |
@@ -344,8 +344,9 @@ The `submit` payload is a **superset**: which keys appear depends on the compone
 it. `values` comes from a `WizardForm`, `order` from a `SortableList`, `rowIds`/`rows` from a
 `DataGrid`, `value`/`label` from a `RatingScale`, `decisions`/`accepted`/`rejected` from a
 `DiffReview`, `region`/`point`/`mode` from a `RegionMark`, `pairs`/`unassigned` from a
-`PairMatrix`, `allocations`/`total` from an `AllocateBudget`, and `audio` from any field the
-human spoke into. Read the keys you asked for instead of assuming one shape.
+`PairMatrix`, `allocations`/`total` from an `AllocateBudget`, `tasks`/`opened`/`done`/`skipped`
+from a `WebTask`, `completed`/`source` from an `ESign`, and `audio` from any field the human spoke
+into. Read the keys you asked for instead of assuming one shape.
 
 Both SDKs resolve a blocking `task()` call on the **first terminal event** for that taskId.
 
@@ -357,7 +358,7 @@ than waiting.
 
 ```json
 { "v": "1.0", "type": "error", "code": "unknown_component",
-  "message": "Unknown component \"Chart\". Supported: ActionCard, Notice, WizardForm, SortableList, DataGrid, InteractiveChart, RatingScale, DiffReview, RegionMark, PairMatrix, AllocateBudget." }
+  "message": "Unknown component \"Chart\". Supported: ActionCard, Notice, WizardForm, SortableList, DataGrid, InteractiveChart, RatingScale, DiffReview, RegionMark, PairMatrix, AllocateBudget, WebTask, ESign." }
 ```
 
 | Code | Cause |
@@ -366,7 +367,7 @@ than waiting.
 | `bad_frame` | No `type`, or a required field is missing or the wrong type. Also used for task `props` the bridge refuses, such as a removed wizard field kind or empty `options`; `message` says which. |
 | `unknown_type` | `type` is not a frame in this document. |
 | `unsupported_version` | `v` is not `1.0`. |
-| `unknown_component` | `component` is not one of the eleven. |
+| `unknown_component` | `component` is not one of the thirteen. |
 | `unknown_task` | An operation named a taskId that is not open. |
 
 Validation happens in that order. A `bad_json` frame **does not close the socket**: one
@@ -376,6 +377,11 @@ malformed frame must not cost a working session. Fix and resend.
 
 Every component is a React component in the canvas. None of them execute agent-supplied
 code, and none of them accept HTML.
+
+`WebTask` and `ESign` are the two that show something the canvas did not draw: an embedded browser
+the shell places above the card, loading a page the agent named. Their own controls are still
+canvas pixels, the address is still drawn by the canvas rather than the page, and §6 sets out what
+that costs and what it does not.
 
 ### ActionCard — a decision
 
@@ -845,6 +851,151 @@ discover later is that they did not.
 card could never reach its own total, so it could never be sent, and the human would have no way
 to say so.
 
+### WebTask — go and do these on the web
+
+```json
+{ "title": "Three stops, in any order",
+  "intro": "Each row says what finished looks like.",
+  "items": [ { "id": "renew-insurance", "title": "Renew the car insurance",
+               "url": "https://portal.example.com/renew/8842",
+               "note": "Quote is at step three. Take the 12-month term.",
+               "done": "a policy number is on the screen" } ],
+  "session": { "label": "your portal login", "cookies": [ … ], "origins": [ … ] },
+  "openIn": "embedded",
+  "allowSkip": true,
+  "returnFiles": true,
+  "submitLabel": "Send the list back" }
+```
+
+One URL or a list of them, done by the human in an embedded browser inside the card, with a note
+per row. This is the first kind here that is not answered by pressing something: the answer is a
+*session*, and what comes back is what happened on each stop.
+
+`items[].done` is not decoration. "Complete" with no definition is the failure mode of every
+delegated task, so the agent has to say what it will accept and the human gets to check that against
+what is on screen.
+
+Progress streams as non-terminal `change`, and it carries the **whole board**:
+
+```json
+{ "name": "webtask-item", "value": "done",
+  "tasks": [ { "id": "renew-insurance", "status": "done", "note": "used the 12-month term",
+               "lastUrl": "https://portal.example.com/renew/8842", "openedAt": 1774…, "completedAt": 1774… } ],
+  "opened": 1, "done": 1, "total": 3 }
+```
+
+`value` ∈ `opened | done | skipped | noted | attached`. The same argument as an
+`AllocateBudget`'s `allocations`: a queue only means anything as a whole, and an agent that has to
+reassemble "3 of 7 done" from a series of single-row deltas will get it wrong the first time a row
+is reopened.
+
+The send button emits `submit`:
+
+```json
+{ "component": "WebTask",
+  "tasks": [ { "id": "renew-insurance", "status": "done", "note": "…",
+               "lastUrl": "https://portal.example.com/renew/8842",
+               "openedAt": 1774…, "completedAt": 1774… },
+             { "id": "book-slot", "status": "skipped" } ],
+  "opened": 2, "done": 1, "total": 3,
+  "skipped": ["book-slot"],
+  "notes": "the portal wanted the policy number from the renewal email",
+  "sessionKept": false,
+  "files": { "pay-invoice": { "mime": "application/pdf", "filename": "receipt.pdf",
+                             "size": 41233, "data": "<base64>" } } }
+```
+
+Every row is present, and `skipped` names the ones the human chose not to do — which is the
+difference between "they said no" and "they ran out of time". A row that was never touched comes
+back `status: "pending"`.
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `items` | yes | 1 to 32 rows. Each needs a non-empty `id`, a non-empty `title` and a `url`; ids must be unique. |
+| `items[].url` | yes | `https:`, or `http:` on this machine. See §6. |
+| `items[].note` | no | The agent's own instructions for that stop, drawn on the row. |
+| `items[].done` | no | What finished looks like, in the agent's words. |
+| `items[].optional` | no | Marks a row that may be skipped without stopping the answer. |
+| `session` | no | Cookies and per-origin `localStorage` to carry into the embedded browser. |
+| `openIn` | no | `embedded` or `browser`. `browser` is forced wherever no embedded view exists. |
+| `autoAdvance` | no | Default `false`. Moves the eye to the next open row when one is done. Never opens it. |
+| `allowSkip` | no | Default `true`. |
+| `returnFiles` | no | Default `false`. Offers a file control per row, for a stop that ends in a download. |
+
+A row's state survives a restart: the canvas keeps it in `localStorage` under the task id, so
+re-sending the same `taskId` resumes the list rather than resetting it. An `update` that adds rows
+leaves the rows already marked alone, because ids are the join.
+
+### ESign — sign this
+
+```json
+{ "url": "https://sign.example.com/envelope/9f3c1a02" }
+```
+
+or:
+
+```json
+{ "document": { "src": "https://…/lease.pdf", "filename": "lease-renewal.pdf",
+                "mime": "application/pdf" },
+  "fields": [ { "id": "tenant.signature", "kind": "signature", "page": 1,
+                "label": "Signature", "x": 0.104, "y": 0.318, "w": 0.44, "h": 0.055,
+                "required": true } ],
+  "useAcroForm": true,
+  "flatten": true,
+  "signer": { "name": "", "email": "" },
+  "submitLabel": "Send the signed copy" }
+```
+
+Two modes, because there are two real situations. A **`url`** is a signing page at a provider: the
+human signs there, in the provider's own flow, and what comes back is a confirmation, who signed,
+and whatever copy they attach. A **`document`** is the PDF itself, and the canvas does more with it:
+it renders the pages, puts a box exactly where each field goes, takes a drawn or typed signature,
+fills the document and hands the signed bytes back as `document` in the answer.
+
+Exactly one of `url` and `document`. Field coordinates are fractions of the page with the origin at
+the top left — the same language `RegionMark` uses for marks on a picture — and pages are numbered
+from 1. `kind` ∈ `text | date | initials | signature | checkbox`.
+
+`fields` matters most for documents with **no form in them at all**, which is most of what a person
+is asked to sign: the agent says where the signature goes by coordinate and the canvas draws it
+there. When the document does carry an AcroForm, its widgets are picked up by name (`useAcroForm`,
+on by default) and merged with the declared fields, which override them where the ids match.
+
+The answer:
+
+```json
+{ "component": "ESign", "completed": true, "source": "filled",
+  "document": { "mime": "application/pdf", "filename": "lease-renewal.pdf",
+                "size": 51204, "data": "<base64>" },
+  "signer": { "name": "A Person", "email": "a@b.example", "signedAt": "2026-10-27T09:14:02.113Z" },
+  "fields": { "tenant.name": "A Person", "tenant.signature": "drawn signature" } }
+```
+
+`source` ∈ `filled | attached | provider`: whether the canvas filled the document, the human
+attached a copy a provider gave them, or they only confirmed the signing. `fields` carries the text
+values and *describes* signatures as `drawn signature` or `typed signature (A Person)`; it never
+carries an image of one.
+
+Progress streams as `change` with `{ "filled": 2, "totalFields": 3 }`.
+
+What this is not, and the card says so too: **a drawn signature is a picture of a signature.** It is
+drawn onto the page. pdf-lib has no cryptographic signing and no certificate, so this fills and
+marks documents, it does not notarise them. Encrypted documents and XFA forms cannot be written by
+pdf-lib at all: both are detected, the card says which one happened, and the attach-a-copy path is
+offered instead. A returned document is capped at 8 MiB (base64 inflates by a third, and the frame
+cap in §6 is 16 MiB); past that, a link is the honest answer rather than bytes.
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `url` | one of | An `https:` signing page. |
+| `document` | one of | `{ src, filename?, mime? }`. `src` is `https:` or `data:application/pdf;base64,…`. |
+| `fields` | no | Up to 64 fields to place. |
+| `useAcroForm` | no | Default `true`: merge the document's own form fields. |
+| `flatten` | no | Default `true`: bake the values in and drop the interactive fields. |
+| `signer` | no | Prefill the "who is signing" line. |
+| `returnSignedCopy` | no | Default `true`. Offer attach-a-copy even in document mode. |
+| `session` | no | A provider link often needs a login, so the same machinery as `WebTask`. |
+
 ### Unknown components
 
 Rejected at the bridge with `unknown_component` and never rendered. If a spec fails to
@@ -877,6 +1028,42 @@ compile, the canvas draws the compiler error in the card instead of an empty box
   and `icon` resolves only against a fixed allow-list.
 - Payloads are capped at 16 MiB per frame.
 
+### The one exception, and what it costs
+
+`WebTask` and `ESign` load a real page in an embedded browser, and that is a genuine departure
+from the rule above. The page is a native child webview inside the overlay window, not markup
+rendered by the canvas, and it can do anything a browser tab can do — including asking the human
+for a password.
+
+That is the risk worth naming plainly: an agent steered by content it read could point the
+embedded browser at a page it controls and ask the human to "log in to continue". Nothing here
+stops that from being attempted. What the design does is make it hard to mistake, and limit what
+it is worth:
+
+- **The address is drawn by us, never by the page.** The toolbar's origin strip is canvas pixels
+  above the embedded view, and an embedded page cannot paint over it. The host is shown with a
+  lock glyph for `https` and a warning glyph otherwise.
+- **Session handover is a question, not a default.** Nothing is placed until the human is shown
+  the exact origins and the counts of cookies and stored values, and says yes. Values are never
+displayed, here or anywhere else, and the choice can be remembered per origin.
+- **A cookie is only placed for the host being opened.** A payload naming three sites cannot
+  spray bank cookies at a shopping cart.
+- **Runs are isolated.** Every task gets its own webview data directory, and the cookies placed
+  for it are deleted when the card finishes unless the human chose to keep the sign-in.
+- **The embedded page cannot talk to the app.** The canvas is the only webview with any IPC
+  access: the capability file scopes it to the canvas webview by label, and every command in the
+  shell refuses a caller that is not the canvas.
+- **Only `https:` (or `http:` on loopback) may be opened**, checked at the bridge before a card
+  exists and again by the shell before a window exists. `javascript:`, `data:` and `file:` are
+  refused by name, and a running page that tries to navigate to one is stopped and the card says so.
+- **Nothing is auto-filled or auto-submitted.** The canvas never types into the page and never
+  presses its buttons.
+
+What is *not* mitigated, and should be said: a human who says yes to a hostile origin has handed
+that session over, and the card has no way to know the difference between a portal and a phishing
+page wearing the same hostname. The defence is the origin on screen, the explicit ask, and a person
+who recognises the site they are being asked about.
+
 ## 7. When the agent goes away
 
 An answer is only worth as much as the socket it travels down. The moment the last agent
@@ -893,6 +1080,14 @@ not pretend otherwise:
   The grace exists so a bridge restart, or an agent that reconnects immediately, does not
   throw away a question the human was mid-way through answering.
 - If an agent reconnects inside the grace period, the question becomes answerable again.
+
+**A delegated web task is the exception, deliberately.** Dropping a card six seconds after an
+agent disconnects is right for a question and wrong for a session: someone halfway through a
+checkout or a signature must not have the page pulled out from under them. So a `WebTask` or
+`ESign` card keeps its embedded browser, keeps its rows and notes, and says how the human can still
+hand the work back — the `submit` is retained by the bridge like any terminal event, for
+ten minutes, and an agent that reconnects inside that window collects it with `answers`. Past the
+window the answer is gone, which the card does not claim otherwise about.
 
 There is no frame for any of this on the wire, because the agent is not there to read one.
 The practical consequence for agent authors: **a question that goes unanswered while you are
@@ -981,6 +1176,6 @@ also reads `VITE_AURAUI_STT_URL` and `VITE_AURAUI_STT_MODEL` **at build time** f
 transcription; see the voice section under `WizardForm`. Leaving both unset is supported.
 
 Run `python3 examples/demo_agent.py` or `node examples/demo-agent.mjs` for a full walkthrough
-of all eleven component kinds against a live bridge. Each card asks one question and most of
+of all thirteen component kinds against a live bridge. Each card asks one question and most of
 them are answered by a single press: the incident report is a run of single-question cards,
 and the patch is reviewed one hunk at a time.

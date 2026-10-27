@@ -22,7 +22,9 @@ import type { AgentFrame, CanvasState, EventName, Signal, WaitState } from "./pr
  *  - **desktop** — inside the Tauri shell. Agent frames arrive as `auraui://frame` events
  *    from the Rust bridge and answers go back through the `auraui_emit` command.
  *  - **demo** — a plain browser (`npm run dev`) with no Rust and no agent. A scripted agent
- *    walks through all eleven component kinds so the renderer is still workable.
+ *    walks through all thirteen component kinds so the renderer is still workable — including the
+ *    two delegated kinds, which degrade to open-in-your-browser here because a page in a browser
+ *    tab cannot hand a session to an embedded view.
  *
  * The store is transport-agnostic; only this file knows the difference.
  */

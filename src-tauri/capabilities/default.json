@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default capabilities for the AuraUI canvas window.",
-  "windows": ["main"],
+  "description": "Default capabilities for the AuraUI canvas webview, and only that webview.",
+  "webviews": ["main"],
   "permissions": ["core:default", "core:event:default", "core:window:default", "core:webview:default"]
 }

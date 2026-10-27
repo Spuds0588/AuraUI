@@ -672,3 +672,306 @@ def allocate_budget(
             "help": help,
         }
     )
+
+
+def _require_web_url(value: Any, what: str) -> str:
+    """Check an address a delegated web task will open, the same way the bridge does.
+
+    ``https`` only, except on loopback: a local tool is a legitimate thing to delegate to, and the
+    bridge itself is loopback-only for the same reason. Checked here as well as on the wire because
+    the failure this catches is an agent building a whole list around a URL that will be refused.
+    """
+    url = _require_text(value, what)
+    lower = url.lower()
+    if lower.startswith("https://"):
+        return url
+    if lower.startswith("http://"):
+        authority = lower[7:].split("/")[0].split("?")[0].split("#")[0]
+        host = authority.rsplit("@", 1)[-1]
+        if host.startswith("["):
+            host = host[1:].split("]")[0]
+        else:
+            host = host.split(":")[0]
+        if host in ("localhost", "::1") or host.startswith("127.") or host.endswith(".localhost"):
+            return url
+        raise ValueError(
+            f'{what} is "{url}", which is plain http: a delegated web task has to travel over '
+            "https, unless it points at this machine (localhost, 127.0.0.1, ::1)."
+        )
+    raise ValueError(
+        f'{what} is "{url}", and a delegated web task only takes an https: address. '
+        "javascript:, data: and file: are refused by name."
+    )
+
+
+def web_task_item(
+    id: str,
+    title: str,
+    url: str,
+    *,
+    note: Optional[str] = None,
+    done: Optional[str] = None,
+    optional: Optional[bool] = None,
+) -> Dict[str, Any]:
+    """One stop on a delegated list.
+
+    ``done`` is the agent's own sentence for what finished looks like, and it is not decoration:
+    "complete" with no definition is the failure mode of every delegated task, so the agent has to
+    say what it will accept and the human gets to check that against what is on screen.
+    """
+    _require_text(id, "web_task_item id")
+    _require_text(title, "web_task_item title")
+    _require_web_url(url, f'web_task_item "{id}" url')
+    if done is not None:
+        _require_text(done, f'web_task_item "{id}" done')
+    return _drop_none(
+        {"id": id, "title": title, "url": url, "note": note, "done": done, "optional": optional}
+    )
+
+
+def session_cookie(
+    name: str,
+    value: str,
+    domain: str,
+    *,
+    path: Optional[str] = None,
+    secure: Optional[bool] = None,
+    http_only: Optional[bool] = None,
+    same_site: Optional[str] = None,
+    expires: Optional[int] = None,
+) -> Dict[str, Any]:
+    """One cookie from the session the agent was using.
+
+    ``http_only`` works because the canvas places cookies through the host's cookie API rather than
+    through ``document.cookie``, which is the only way a real login cookie can be handed over at all.
+    """
+    _require_text(name, "session_cookie name")
+    _require_text(domain, "session_cookie domain")
+    if same_site is not None:
+        _require_one_of(same_site, ("lax", "strict", "none"), "session_cookie sameSite")
+    return _drop_none(
+        {
+            "name": name,
+            "value": value,
+            "domain": domain,
+            "path": path,
+            "secure": secure,
+            "httpOnly": http_only,
+            "sameSite": same_site,
+            "expires": expires,
+        }
+    )
+
+
+def web_origin(origin: str, local_storage: Optional[Sequence[Dict[str, str]]] = None) -> Dict[str, Any]:
+    """One origin's ``localStorage``, seeded before the page's own scripts run.
+
+    ``origin`` has to be the full origin (``https://example.com``): the canvas seeds storage by exact
+    origin match, so a bare host would be written nowhere.
+    """
+    _require_text(origin, "web_origin origin")
+    if not origin.startswith(("http://", "https://")):
+        raise ValueError(
+            f'web_origin "{origin}" has to be a full origin (https://example.com), because the '
+            "canvas seeds storage by exact origin match."
+        )
+    return _drop_none({"origin": origin, "localStorage": list(local_storage or [])})
+
+
+def web_session(
+    *,
+    cookies: Sequence[Dict[str, Any]] = (),
+    origins: Sequence[Dict[str, Any]] = (),
+    label: Optional[str] = None,
+    note: Optional[str] = None,
+) -> Dict[str, Any]:
+    """What is handed to the embedded view so the human carries on where the agent stopped.
+
+    Deliberately the shape a browser automation library already holds: cookies plus per-origin
+    storage, so a dump of what the agent had is a valid argument here. Every origin in it is shown
+    to the human, by name, before anything is placed.
+    """
+    if not cookies and not origins:
+        raise ValueError(
+            "web_session needs at least one cookie or one origin: there is nothing to hand over, "
+            "and nothing for the human to be asked about."
+        )
+    if len(cookies) > 200:
+        raise ValueError("web_session carries more than 200 cookies: a session is not a cookie jar.")
+    if len(origins) > 32:
+        raise ValueError("web_session names more than 32 origins.")
+    return _drop_none(
+        {
+            "label": label,
+            "note": note,
+            "cookies": list(cookies),
+            "origins": list(origins),
+        }
+    )
+
+
+def web_task(
+    items: Sequence[Dict[str, Any]],
+    *,
+    title: Optional[str] = None,
+    intro: Optional[str] = None,
+    session: Optional[Dict[str, Any]] = None,
+    open_in: Optional[str] = None,
+    auto_advance: Optional[bool] = None,
+    allow_skip: Optional[bool] = None,
+    return_files: Optional[bool] = None,
+    submit_label: Optional[str] = None,
+    help: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Props for WebTask: "go and do these on the web for me".
+
+    A list rather than one URL at a time, because that is what the job usually is: nine stops that
+    all need the same login. One card carries the queue, a row can be skipped, and the answer is the
+    whole board with a note per row.
+    """
+    _require_items(items, "web_task items")
+    if len(items) > 32:
+        raise ValueError(
+            f"web_task carries {len(items)} items and the cap is 32: send a second card when the "
+            "first is done rather than one list nobody can see the end of."
+        )
+    seen: List[str] = []
+    for index, item in enumerate(items):
+        if not isinstance(item, dict):
+            raise ValueError(f"web_task item {index + 1} must be a dict built with web_task_item().")
+        item_id = _require_text(item.get("id"), f"web_task item {index + 1} id")
+        if item_id in seen:
+            raise ValueError(
+                f'web_task item id "{item_id}" is used twice: the answer is keyed by id, so a '
+                "duplicate could not say which row was done."
+            )
+        seen.append(item_id)
+    if open_in is not None:
+        _require_one_of(open_in, ("embedded", "browser"), "web_task openIn")
+    return _drop_none(
+        {
+            "items": list(items),
+            "title": title,
+            "intro": intro,
+            "session": session,
+            "openIn": open_in,
+            "autoAdvance": auto_advance,
+            "allowSkip": allow_skip,
+            "returnFiles": return_files,
+            "submitLabel": submit_label,
+            "help": help,
+        }
+    )
+
+
+SIGN_FIELD_KINDS = ("text", "date", "initials", "signature", "checkbox")
+
+
+def sign_field(
+    id: str,
+    kind: str,
+    *,
+    x: float,
+    y: float,
+    w: float,
+    h: float,
+    page: Optional[int] = None,
+    label: Optional[str] = None,
+    required: Optional[bool] = None,
+    value: Optional[str] = None,
+) -> Dict[str, Any]:
+    """One place on a page to write something.
+
+    Coordinates are fractions of the page with the origin at the top left, which is the same language
+    :func:`region_mark` uses for marks on a picture: the agent knows the page it sent, the canvas
+    knows how large it drew it, and a fraction is the one coordinate both agree on without being told
+    the other's size.
+    """
+    _require_text(id, "sign_field id")
+    _require_one_of(kind, SIGN_FIELD_KINDS, "sign_field kind")
+    for key, number in (("x", x), ("y", y), ("w", w), ("h", h)):
+        if not isinstance(number, (int, float)) or isinstance(number, bool) or not 0 <= number <= 1:
+            raise ValueError(
+                f'sign_field "{id}" {key} must be a number between 0 and 1, as a fraction of the page.'
+            )
+    if page is not None and (not isinstance(page, int) or isinstance(page, bool) or page < 1):
+        raise ValueError(f'sign_field "{id}" page is one-based, so it starts at 1.')
+    return _drop_none(
+        {
+            "id": id,
+            "kind": kind,
+            "page": page,
+            "label": label,
+            "x": x,
+            "y": y,
+            "w": w,
+            "h": h,
+            "required": required,
+            "value": value,
+        }
+    )
+
+
+def esign(
+    *,
+    url: Optional[str] = None,
+    document: Optional[Dict[str, Any]] = None,
+    fields: Optional[Sequence[Dict[str, Any]]] = None,
+    use_acro_form: Optional[bool] = None,
+    flatten: Optional[bool] = None,
+    signer: Optional[Dict[str, str]] = None,
+    title: Optional[str] = None,
+    intro: Optional[str] = None,
+    return_signed_copy: Optional[bool] = None,
+    submit_label: Optional[str] = None,
+    help: Optional[str] = None,
+    session: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Props for ESign: "sign this".
+
+    Exactly one of ``url`` and ``document``. A ``url`` is a signing page at a provider — the human
+    signs there and the card collects a confirmation plus whatever copy they attach. A ``document``
+    is the PDF itself, and the canvas does more with it: it renders the pages, puts a box where each
+    field goes, takes a drawn or typed signature, fills the document and hands the bytes back.
+
+    ``fields`` matters most for documents with no form in them at all, which is most of what a person
+    is asked to sign: the agent says where the signature goes by coordinate and the canvas draws it
+    there. When the document does carry a form, those fields are picked up by name and merged.
+    """
+    if (1 if url else 0) + (1 if document else 0) != 1:
+        raise ValueError(
+            "esign needs exactly one of url (a signing page) and document (the PDF to fill and sign)."
+        )
+    if url is not None:
+        _require_web_url(url, "esign url")
+    if document is not None:
+        if not isinstance(document, dict):
+            raise ValueError("esign document must be a dict with a src.")
+        src = _require_text(document.get("src"), "esign document src")
+        if not src.startswith("data:"):
+            _require_web_url(src, "esign document src")
+        elif not src.startswith("data:application/pdf"):
+            raise ValueError(
+                "esign document src is a data URL that is not a PDF: this component fills PDF documents."
+            )
+    if fields is not None:
+        if not isinstance(fields, (list, tuple)):
+            raise ValueError("esign fields must be a list built with sign_field().")
+        if len(fields) > 64:
+            raise ValueError(f"esign carries {len(fields)} fields and the cap is 64.")
+    return _drop_none(
+        {
+            "url": url,
+            "document": document,
+            "fields": list(fields) if fields is not None else None,
+            "useAcroForm": use_acro_form,
+            "flatten": flatten,
+            "signer": signer,
+            "title": title,
+            "intro": intro,
+            "returnSignedCopy": return_signed_copy,
+            "submitLabel": submit_label,
+            "help": help,
+            "session": session,
+        }
+    )

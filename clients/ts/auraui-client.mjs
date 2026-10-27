@@ -1474,6 +1474,281 @@ export function allocateBudget(items, total, { step, requireTotal, submitLabel, 
   return compact({ items, total, step, requireTotal, submitLabel, help });
 }
 
+/**
+ * Check an address a delegated web task will open, the same way the bridge does.
+ *
+ * `https` only, except on loopback: a local tool is a legitimate thing to delegate to, and the
+ * bridge itself is loopback-only for the same reason. Checked here as well as on the wire because
+ * the failure this catches is an agent building a whole list around a URL that will be refused.
+ */
+function requireWebUrl(value, what) {
+  requireString(value, what);
+  const lower = String(value).toLowerCase();
+  if (lower.startsWith("https://")) return;
+  if (lower.startsWith("http://")) {
+    const host = lower.slice(7).split(/[/?#]/)[0].split("@").pop().replace(/^\[/, "").split("]")[0];
+    const bare = host.split(":")[0];
+    if (bare === "localhost" || bare === "::1" || bare.startsWith("127.") || bare.endsWith(".localhost")) {
+      return;
+    }
+    throw new AuraUIError(
+      `${what} is "${value}", which is plain http: a delegated web task has to travel over https, ` +
+        "unless it points at this machine (localhost, 127.0.0.1, ::1).",
+    );
+  }
+  throw new AuraUIError(
+    `${what} is "${value}", and a delegated web task only takes an https: address. javascript:, ` +
+      "data: and file: are refused by name.",
+  );
+}
+
+/**
+ * One stop on a delegated list.
+ *
+ * @param {string} id The key this row comes back under.
+ * @param {string} title What the human reads in the list.
+ * @param {string} url Where it goes. https, or http on this machine.
+ * @param {{note?: string, done?: string, optional?: boolean}} [extra]
+ */
+export function webTaskItem(id, title, url, { note, done, optional } = {}) {
+  requireString(id, "webTaskItem id");
+  requireString(title, "webTaskItem title");
+  requireWebUrl(url, `webTaskItem "${id}" url`);
+  if (done !== undefined) {
+    requireString(done, `webTaskItem "${id}" done`);
+  }
+  return compact({ id, title, url, note, done, optional });
+}
+
+/**
+ * One cookie from the session the agent was using.
+ *
+ * `httpOnly` works because the canvas places cookies through the host's cookie API rather than
+ * through `document.cookie`, which is the only way a real login cookie can be handed over at all.
+ *
+ * @param {string} name
+ * @param {string} value
+ * @param {string} domain
+ * @param {{path?: string, secure?: boolean, httpOnly?: boolean,
+ *          sameSite?: "lax"|"strict"|"none", expires?: number}} [extra]
+ */
+export function sessionCookie(name, value, domain, extra = {}) {
+  requireString(name, "sessionCookie name");
+  requireString(domain, "sessionCookie domain");
+  return compact({ name, value, domain, ...extra });
+}
+
+/**
+ * One origin's `localStorage`, as the pairs it is written back out in.
+ *
+ * @param {string} origin The full origin, `https://example.com`. Matched exactly.
+ * @param {{name: string, value: string}[]} localStorage
+ */
+export function webOrigin(origin, localStorage = []) {
+  requireString(origin, "webOrigin origin");
+  if (!/^https?:\/\//.test(origin)) {
+    throw new AuraUIError(
+      `webOrigin "${origin}" has to be a full origin (https://example.com), because the canvas ` +
+        "seeds storage by exact origin match.",
+    );
+  }
+  return compact({ origin, localStorage });
+}
+
+/**
+ * Props for WebTask: a list of pages to work through, with somewhere to write down what happened.
+ *
+ * The shape an agent's own browser session already has: cookies plus per-origin localStorage, so a
+ * dump of what it was holding is a valid argument here rather than something to transform.
+ *
+ * @param {{cookies?: object[], origins?: object[], label?: string, note?: string}} [session]
+ */
+export function webSession({ cookies = [], origins = [], label, note } = {}) {
+  if (cookies.length === 0 && origins.length === 0) {
+    throw new AuraUIError(
+      "webSession needs at least one cookie or one origin: there is nothing to hand over, and " +
+        "nothing for the human to be asked about.",
+    );
+  }
+  if (cookies.length > 200) {
+    throw new AuraUIError("webSession carries more than 200 cookies: a session is not a cookie jar.");
+  }
+  if (origins.length > 32) {
+    throw new AuraUIError("webSession names more than 32 origins.");
+  }
+  return compact({ label, note, cookies, origins });
+}
+
+/**
+ * Props for WebTask: "go and do these on the web for me".
+ *
+ * A list rather than one URL at a time, because that is what the job usually is: nine stops that
+ * all need the same login. One card carries the queue, a row can be skipped, and the answer is the
+ * whole board with a note per row.
+ *
+ * @param {object[]} items Built with `webTaskItem()`.
+ * @param {{title?: string, intro?: string, session?: object, openIn?: "embedded"|"browser",
+ *          autoAdvance?: boolean, allowSkip?: boolean, returnFiles?: boolean,
+ *          submitLabel?: string, help?: string}} [extra]
+ */
+export function webTask(items, {
+  title,
+  intro,
+  session,
+  openIn,
+  autoAdvance,
+  allowSkip,
+  returnFiles,
+  submitLabel,
+  help,
+} = {}) {
+  requireNonEmptyArray(items, "webTask items");
+  if (items.length > 32) {
+    throw new AuraUIError(
+      `webTask carries ${items.length} items and the cap is 32: send a second card when the first ` +
+        "is done rather than one list nobody can see the end of.",
+    );
+  }
+  const seen = new Set();
+  items.forEach((item, index) => {
+    if (typeof item !== "object" || item === null) {
+      throw new AuraUIError(`webTask item ${index + 1} must be an object from webTaskItem().`);
+    }
+    requireString(item.id, `webTask item ${index + 1} id`);
+    if (seen.has(item.id)) {
+      throw new AuraUIError(
+        `webTask item id "${item.id}" is used twice: the answer is keyed by id, so a duplicate ` +
+          "could not say which row was done.",
+      );
+    }
+    seen.add(item.id);
+  });
+  if (openIn !== undefined && openIn !== "embedded" && openIn !== "browser") {
+    throw new AuraUIError('webTask openIn must be "embedded" or "browser".');
+  }
+  return compact({
+    items,
+    title,
+    intro,
+    session,
+    openIn,
+    autoAdvance,
+    allowSkip,
+    returnFiles,
+    submitLabel,
+    help,
+  });
+}
+
+const SIGN_FIELD_KINDS = ["text", "date", "initials", "signature", "checkbox"];
+
+/**
+ * One place on a page to write something.
+ *
+ * Coordinates are fractions of the page with the origin at the top left, which is the same language
+ * `regionMark` uses for marks on a picture: the agent knows the page it sent, the canvas knows how
+ * large it drew it, and a fraction is the one coordinate both agree on without being told the
+ * other's size.
+ *
+ * @param {string} id The key this field's value comes back under, or the PDF's own field name.
+ * @param {"text"|"date"|"initials"|"signature"|"checkbox"} kind
+ * @param {{x: number, y: number, w: number, h: number, page?: number, label?: string,
+ *          required?: boolean, value?: string}} box
+ */
+export function signField(id, kind, { x, y, w, h, page, label, required, value } = {}) {
+  requireString(id, "signField id");
+  if (!SIGN_FIELD_KINDS.includes(kind)) {
+    throw new AuraUIError(
+      `signField "${id}" kind must be one of ${SIGN_FIELD_KINDS.join(", ")}, not "${kind}".`,
+    );
+  }
+  for (const [key, value_] of Object.entries({ x, y, w, h })) {
+    if (typeof value_ !== "number" || value_ < 0 || value_ > 1) {
+      throw new AuraUIError(
+        `signField "${id}" ${key} must be a number between 0 and 1, as a fraction of the page.`,
+      );
+    }
+  }
+  if (page !== undefined && (!Number.isInteger(page) || page < 1)) {
+    throw new AuraUIError(`signField "${id}" page is one-based, so it starts at 1.`);
+  }
+  return compact({ id, kind, page, label, x, y, w, h, required, value });
+}
+
+/**
+ * Props for ESign: "sign this".
+ *
+ * Exactly one of `url` and `document`. A `url` is a signing page at a provider — the human signs
+ * there and the card collects a confirmation plus whatever copy they attach. A `document` is the PDF
+ * itself, and the canvas does more with it: it renders the pages, puts a box where each field goes,
+ * takes a drawn or typed signature, fills the document and hands the bytes back.
+ *
+ * `fields` matters most for documents with no form in them at all, which is most of what a person is
+ * asked to sign: the agent says where the signature goes by coordinate and the canvas draws it there.
+ * When the document *does* carry a form, those fields are picked up by name and merged with these.
+ *
+ * @param {{url?: string,
+ *          document?: {src: string, filename?: string, mime?: string},
+ *          fields?: object[], useAcroForm?: boolean, flatten?: boolean,
+ *          signer?: {name?: string, email?: string}, title?: string, intro?: string,
+ *          returnSignedCopy?: boolean, submitLabel?: string, help?: string,
+ *          session?: object}} [props]
+ */
+export function esign({
+  url,
+  document,
+  fields,
+  useAcroForm,
+  flatten,
+  signer,
+  title,
+  intro,
+  returnSignedCopy,
+  submitLabel,
+  help,
+  session,
+} = {}) {
+  if ((url ? 1 : 0) + (document ? 1 : 0) !== 1) {
+    throw new AuraUIError(
+      "esign needs exactly one of url (a signing page) and document (the PDF to fill and sign).",
+    );
+  }
+  if (url !== undefined) requireWebUrl(url, "esign url");
+  if (document !== undefined) {
+    if (typeof document !== "object" || document === null) {
+      throw new AuraUIError("esign document must be { src, filename?, mime? }.");
+    }
+    requireString(document.src, "esign document src");
+    if (!String(document.src).startsWith("data:")) {
+      requireWebUrl(document.src, "esign document src");
+    } else if (!String(document.src).startsWith("data:application/pdf")) {
+      throw new AuraUIError(
+        "esign document src is a data URL that is not a PDF: this component fills PDF documents.",
+      );
+    }
+  }
+  if (fields !== undefined) {
+    if (!Array.isArray(fields)) throw new AuraUIError("esign fields must be an array from signField().");
+    if (fields.length > 64) {
+      throw new AuraUIError(`esign carries ${fields.length} fields and the cap is 64.`);
+    }
+  }
+  return compact({
+    url,
+    document,
+    fields,
+    useAcroForm,
+    flatten,
+    signer,
+    title,
+    intro,
+    returnSignedCopy,
+    submitLabel,
+    help,
+    session,
+  });
+}
+
 /** Namespace holding every prop builder, for `import { components as c }`. */
 export const components = {
   option,
@@ -1499,6 +1774,13 @@ export const components = {
   pairMatrix,
   allocationItem,
   allocateBudget,
+  webTaskItem,
+  webTask,
+  sessionCookie,
+  webOrigin,
+  webSession,
+  signField,
+  esign,
 };
 
 export default Agent;

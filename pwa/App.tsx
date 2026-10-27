@@ -13,7 +13,7 @@ import { useLink } from "./useLink";
  * The desktop canvas is an overlay on someone else's screen; this is an app someone opened on
  * purpose, so the chrome is different and the question is not. That distinction is the whole
  * design: everything about *how a question is asked* is shared code — the same registry, the
- * same eleven components, the same protocol — and only the frame around it is written twice,
+ * same thirteen components, the same protocol — and only the frame around it is written twice,
  * because a phone and a full-screen overlay genuinely are different places to be.
  *
  * One question at a time still holds. It holds harder here: a phone shows one card because

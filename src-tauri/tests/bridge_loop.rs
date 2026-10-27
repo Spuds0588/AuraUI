@@ -997,6 +997,259 @@ async fn the_three_newer_kinds_reach_a_human_and_come_back() {
     handle.shutdown();
 }
 
+/// The two kinds that hand work over instead of asking about it: a list of stops and a document to
+/// sign. Both are gated harder than the rest, because both can put a page in front of the human and
+/// both can carry a session into it.
+#[tokio::test]
+async fn the_two_hand_over_kinds_reach_a_human_and_come_back() {
+    let sink = Arc::new(TestSink::new(Delivery::Attached));
+    let mut delivered = sink.subscribe();
+    let handle = start_bridge(sink.clone()).await;
+    let mut ws = connect(&handle).await;
+    let _welcome = recv_json(&mut ws).await;
+
+    // A plaintext address that is not this machine: refused, because the embedded view would carry
+    // a real session to whatever the name resolves to today. A loopback `http:` is allowed.
+    send_json(
+        &mut ws,
+        json!({
+            "type": "task",
+            "taskId": "t_list_bad_url",
+            "component": "WebTask",
+            "props": {"items": [{"id": "pay", "title": "Pay it", "url": "http://example.com/pay"}]}
+        }),
+    )
+    .await;
+    let error = recv_json(&mut ws).await;
+    assert_eq!(error["code"].as_str(), Some("bad_frame"));
+    assert!(
+        error["message"].as_str().unwrap_or_default().contains("https"),
+        "the refusal should say what a delegated address may be: {error}"
+    );
+
+    // Two rows with the same id: the answer is keyed by id, so it could not say which one was done.
+    send_json(
+        &mut ws,
+        json!({
+            "type": "task",
+            "taskId": "t_list_dup",
+            "component": "WebTask",
+            "props": {"items": [
+                {"id": "pay", "title": "Pay it", "url": "https://example.com/pay"},
+                {"id": "pay", "title": "Pay it again", "url": "https://example.com/pay"}
+            ]}
+        }),
+    )
+    .await;
+    let error = recv_json(&mut ws).await;
+    assert_eq!(error["code"].as_str(), Some("bad_frame"));
+    assert!(
+        error["message"].as_str().unwrap_or_default().contains("already used"),
+        "the refusal should name the collision: {error}"
+    );
+
+    // A session with nothing in it: nothing to hand over, and nothing for the human to be asked
+    // about, so it is refused rather than injected on the strength of a label.
+    send_json(
+        &mut ws,
+        json!({
+            "type": "task",
+            "taskId": "t_list_empty_session",
+            "component": "WebTask",
+            "props": {
+                "items": [{"id": "pay", "title": "Pay it", "url": "https://example.com/pay"}],
+                "session": {"label": "your bank"}
+            }
+        }),
+    )
+    .await;
+    let error = recv_json(&mut ws).await;
+    assert_eq!(error["code"].as_str(), Some("bad_frame"));
+    assert!(
+        error["message"].as_str().unwrap_or_default().contains("session"),
+        "the refusal should say which part is wrong: {error}"
+    );
+
+    // Both a signing link and a document: the card would have to pick which one is being signed.
+    let pdf = format!("data:application/pdf;base64,{}", "A".repeat(2048));
+    send_json(
+        &mut ws,
+        json!({
+            "type": "task",
+            "taskId": "t_sign_both",
+            "component": "ESign",
+            "props": {"url": "https://sign.example.com/e/1", "document": {"src": pdf}}
+        }),
+    )
+    .await;
+    let error = recv_json(&mut ws).await;
+    assert_eq!(error["code"].as_str(), Some("bad_frame"));
+    assert!(
+        error["message"].as_str().unwrap_or_default().contains("not both"),
+        "the refusal should say the target is ambiguous: {error}"
+    );
+
+    assert!(
+        sink.task_frames().is_empty(),
+        "none of those refusals may reach the human's surface"
+    );
+
+    // The list. Two stops, one of them optional, and a session that is the shape a browser
+    // automation library already holds.
+    send_json(
+        &mut ws,
+        json!({
+            "type": "task",
+            "taskId": "t_list",
+            "component": "WebTask",
+            "instruction": "Three stops before the office closes.",
+            "props": {
+                "title": "Three stops, in any order",
+                "items": [
+                    {"id": "renew", "title": "Renew the car insurance",
+                     "url": "https://portal.example.com/renew/8842",
+                     "note": "Quote is at step three.",
+                     "done": "a policy number is on the screen"},
+                    {"id": "invoice", "title": "Pay invoice 4471",
+                     "url": "https://billing.example.com/i/4471", "optional": true}
+                ],
+                "session": {
+                    "label": "your portal login",
+                    "cookies": [{"name": "sid", "value": "abc", "domain": ".example.com", "httpOnly": true}],
+                    "origins": [{"origin": "https://portal.example.com",
+                                 "localStorage": [{"name": "auth.token", "value": "t0k"}]}]
+                },
+                "returnFiles": true
+            }
+        }),
+    )
+    .await;
+    let ack = recv_json(&mut ws).await;
+    assert_eq!(ack["status"].as_str(), Some("rendered"));
+    assert_eq!(ack["taskId"].as_str(), Some("t_list"));
+
+    match next_delivered(&mut delivered).await {
+        AgentFrame::Task(task) => {
+            assert_eq!(task.component, "WebTask");
+            assert_eq!(task.props["items"][0]["id"].as_str(), Some("renew"));
+            assert_eq!(task.props["session"]["cookies"][0]["name"].as_str(), Some("sid"));
+        }
+        other => panic!("expected the list at the human's surface, got {other:?}"),
+    }
+
+    // A row being ticked off is progress, not an answer: the card is still up and still open.
+    let progress = handle.emit_event(
+        "t_list",
+        EventName::Change,
+        json!({
+            "name": "webtask-item", "value": "done",
+            "tasks": [{"id": "renew", "status": "done", "note": "12-month term"}],
+            "opened": 1, "done": 1, "total": 2
+        }),
+    );
+    let wire = recv_json(&mut ws).await;
+    assert_eq!(wire["event"].as_str(), Some("change"));
+    assert_eq!(wire["seq"].as_u64(), Some(progress.seq));
+    assert!(
+        !progress.event.is_terminal(),
+        "a half-done list is not an answer"
+    );
+
+    let sent = handle.emit_event(
+        "t_list",
+        EventName::Submit,
+        json!({
+            "component": "WebTask",
+            "tasks": [
+                {"id": "renew", "status": "done", "note": "12-month term",
+                 "lastUrl": "https://portal.example.com/renew/8842/thanks"},
+                {"id": "invoice", "status": "pending"}
+            ],
+            "opened": 1, "done": 1, "total": 2,
+            "skipped": [],
+            "notes": "the portal wanted the policy number from the renewal email",
+            "sessionKept": false,
+            "files": {"renew": {"mime": "application/pdf", "filename": "policy.pdf",
+                               "size": 3, "data": "AAAA"}}
+        }),
+    );
+    let wire = recv_json(&mut ws).await;
+    assert_eq!(wire["event"].as_str(), Some("submit"));
+    assert_eq!(wire["payload"]["tasks"][0]["id"].as_str(), Some("renew"));
+    assert_eq!(
+        wire["payload"]["tasks"][0]["lastUrl"].as_str(),
+        Some("https://portal.example.com/renew/8842/thanks")
+    );
+    assert_eq!(wire["payload"]["tasks"][1]["status"].as_str(), Some("pending"));
+    assert_eq!(
+        wire["payload"]["files"]["renew"]["filename"].as_str(),
+        Some("policy.pdf")
+    );
+    assert_eq!(wire["seq"].as_u64(), Some(sent.seq));
+
+    // The signature. A document with no form in it at all, so the fields are the agent's own
+    // coordinates, and the bytes come back through the answer.
+    send_json(
+        &mut ws,
+        json!({
+            "type": "task",
+            "taskId": "t_sign",
+            "component": "ESign",
+            "instruction": "Sign page 3 and date it.",
+            "props": {
+                "document": {"src": pdf, "filename": "lease.pdf", "mime": "application/pdf"},
+                "fields": [
+                    {"id": "sig", "page": 3, "kind": "signature", "label": "Sign here",
+                     "x": 0.12, "y": 0.72, "w": 0.3, "h": 0.06, "required": true},
+                    {"id": "dated", "page": 3, "kind": "date", "x": 0.12, "y": 0.8, "w": 0.2, "h": 0.04}
+                ],
+                "returnSignedCopy": true
+            }
+        }),
+    )
+    .await;
+    let ack = recv_json(&mut ws).await;
+    assert_eq!(ack["status"].as_str(), Some("rendered"));
+
+    match next_delivered(&mut delivered).await {
+        AgentFrame::Task(task) => {
+            assert_eq!(task.component, "ESign");
+            assert_eq!(task.props["fields"][0]["kind"].as_str(), Some("signature"));
+        }
+        other => panic!("expected the signature request at the human's surface, got {other:?}"),
+    }
+
+    let signed = handle.emit_event(
+        "t_sign",
+        EventName::Submit,
+        json!({
+            "component": "ESign", "completed": true, "source": "filled",
+            "document": {"mime": "application/pdf", "filename": "lease-signed.pdf",
+                         "size": 4, "data": "JVBG"},
+            "signer": {"name": "A Person", "signedAt": "2026-10-27T09:14:02.113Z"},
+            "fields": {"sig": "drawn signature", "dated": "2026-10-27"}
+        }),
+    );
+    let wire = recv_json(&mut ws).await;
+    assert_eq!(wire["event"].as_str(), Some("submit"));
+    assert_eq!(wire["payload"]["source"].as_str(), Some("filled"));
+    assert_eq!(
+        wire["payload"]["document"]["filename"].as_str(),
+        Some("lease-signed.pdf")
+    );
+    assert_eq!(
+        wire["payload"]["fields"]["sig"].as_str(),
+        Some("drawn signature"),
+        "a signature is described, never shipped as an image of itself"
+    );
+    assert_eq!(wire["seq"].as_u64(), Some(signed.seq));
+
+    assert_eq!(sink.task_frames().len(), 2);
+    assert_eq!(handle.emitted(), 3);
+
+    handle.shutdown();
+}
+
 #[tokio::test]
 async fn the_bridge_refuses_to_listen_off_loopback() {
     let sink = Arc::new(TestSink::new(Delivery::Attached));

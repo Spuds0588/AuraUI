@@ -45,6 +45,8 @@ COMPONENT_NAMES = (
     "RegionMark",
     "PairMatrix",
     "AllocateBudget",
+    "WebTask",
+    "ESign",
 )
 
 NOTICE_LEVELS = ("info", "success", "warn", "error")

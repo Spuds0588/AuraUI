@@ -411,7 +411,10 @@ export interface EventPayload {
     unassigned?: string[];
     /** AllocateBudget: what each line was given, keyed by item id. */
     allocations?: Record<string, number>;
-    /** AllocateBudget: the figure the parts add up to, echoed back for a cheap sanity check. */
+    /**
+     * AllocateBudget: the figure the parts add up to, echoed back for a cheap sanity check.
+     * WebTask: how many rows the card carried, so `done` can be read without guessing a denominator.
+     */
     total?: number;
     /**
      * Voice: recordings from the voice button, keyed by the field they answer.
@@ -420,6 +423,37 @@ export interface EventPayload {
      * difference between a question they typed and one they answered out loud.
      */
     audio?: Record<string, AudioClip>;
+    /**
+     * WebTask: what became of every item the agent handed over, in the order they were sent.
+     *
+     * The list is complete, not a delta: an agent that reads only this can tell a row the human
+     * deliberately skipped from one they never opened, which is the difference between "they
+     * said no" and "they ran out of time".
+     */
+    tasks?: WebTaskState[];
+    /** WebTask: how many rows were opened, and how many were marked done. */
+    opened?: number;
+    done?: number;
+    /** WebTask: the rows the human skipped on purpose. */
+    skipped?: string[];
+    /** WebTask: the card-level note, for the thing that did not fit in a row. */
+    notes?: string;
+    /** WebTask: whether the human kept the handed-over session for the rest of the list. */
+    sessionKept?: boolean;
+    /** WebTask / ESign: files the human attached, keyed by item id (or `document` for e-sign). */
+    files?: Record<string, ReturnedFile>;
+    /** ESign: the signed or filled document, when one was produced or attached. */
+    document?: ReturnedFile;
+    /** ESign: which way the document came back. */
+    source?: "filled" | "attached" | "provider";
+    /** ESign: who signed, as the human confirmed it. */
+    signer?: Signer;
+    /** ESign: the values that were filled in, keyed by field id. Never the document itself. */
+    fields?: Record<string, string>;
+    /** ESign: true once the human says the signing is done, however it was done. */
+    completed?: boolean;
+    /** ESign: the human's own line about what happened. */
+    note?: string;
   };
   /**
    * A selection changed before anything was sent. Fires on a DataGrid row and on each row a
@@ -458,8 +492,25 @@ export interface EventPayload {
     order?: string[];
     /** AllocateBudget: what every line has been given so far, keyed by item id. */
     allocations?: Record<string, number>;
-    /** AllocateBudget: the figure the lines are being made to add up to. */
+    /**
+     * AllocateBudget: the figure the lines are being made to add up to.
+     * WebTask: how many rows the board carries, alongside `tasks`.
+     */
     total?: number;
+    /**
+     * WebTask: the whole board, so an agent watching a long session can see where it stands.
+     *
+     * The same argument as `allocations` above: a queue is only meaningful as a whole, and an
+     * agent that has to reassemble "3 of 7 done" from a series of single-row deltas will get it
+     * wrong the first time a row is reopened.
+     */
+    tasks?: WebTaskState[];
+    /** WebTask: rows opened and rows done so far. */
+    opened?: number;
+    done?: number;
+    /** ESign: how many fields are filled, out of how many the document asked for. */
+    filled?: number;
+    totalFields?: number;
   };
   sort: { key: string; direction: "asc" | "desc" | "none" };
   /** The human dismissed the task without answering. */
@@ -484,6 +535,8 @@ export const COMPONENT_NAMES = [
   "RegionMark",
   "PairMatrix",
   "AllocateBudget",
+  "WebTask",
+  "ESign",
 ] as const;
 
 export type ComponentName = (typeof COMPONENT_NAMES)[number];
@@ -859,6 +912,220 @@ export interface AllocateBudgetProps {
   help?: string;
 }
 
+/* ------------------------------------------------------------------ *
+ * Delegated web tasks
+ * ------------------------------------------------------------------ */
+
+/** How many items one `WebTask` may carry. Mirrors `WEBTASK_ITEM_LIMIT` in Rust. */
+export const WEBTASK_ITEM_LIMIT = 32;
+
+/** The two ways a delegated task can be opened. `browser` is also what the phone and the demo
+ * build are forced into, because neither can host a webview. */
+export const WEBTASK_OPEN_IN = ["embedded", "browser"] as const;
+export type WebTaskOpenIn = (typeof WEBTASK_OPEN_IN)[number];
+
+/** Where one item has got to. `pending` is the only state that has not been touched. */
+export type WebTaskItemStatus = "pending" | "opened" | "done" | "skipped";
+
+/**
+ * One thing to do on the web, in one place.
+ *
+ * `done` is the agent's own sentence for what finished looks like, and it is not decoration:
+ * "complete" with no definition is the failure mode of every delegated task, so the agent has
+ * to say what it will accept, and the human gets to check that against what is on screen.
+ */
+export interface WebTaskItem {
+  id: string;
+  title: string;
+  url: string;
+  /** The agent's instructions for this stop. Shown above the Open control. */
+  note?: string;
+  /** What "done" means here, in the agent's words. */
+  done?: string;
+  /** A row that may be skipped without stopping the answer. */
+  optional?: boolean;
+}
+
+/** One cookie, as the agent's browser had it. */
+export interface SessionCookie {
+  name: string;
+  value: string;
+  domain: string;
+  path?: string;
+  secure?: boolean;
+  /** Placed through the cookie API, so this works for `HttpOnly` cookies too. */
+  httpOnly?: boolean;
+  sameSite?: "lax" | "strict" | "none";
+  /** Unix seconds. Absent means a session cookie that dies with this run. */
+  expires?: number;
+}
+
+/** One `localStorage` entry, as a pair because that is the shape it is written back out in. */
+export interface WebStorageItem {
+  name: string;
+  value: string;
+}
+
+/** One origin's `localStorage`, seeded before the page's own scripts run. */
+export interface WebOrigin {
+  origin: string;
+  localStorage?: WebStorageItem[];
+}
+
+/**
+ * What the agent hands over so the human picks up where it left off.
+ *
+ * Deliberately `storageState`-shaped (cookies plus per-origin localStorage), because the agent
+ * that has this to hand over is usually one that was driving a browser itself, and a dump of
+ * what it had is a better interface than a format invented here.
+ *
+ * It is also the most sensitive thing on the wire. It is shown to the human, origin by origin,
+ * before anything is placed; it is never echoed back in a receipt; and it is cleared when the
+ * task is done unless the human said to keep the login for the rest of the list.
+ */
+export interface WebSession {
+  /** What to call this session on the consent sheet: "your bank login". */
+  label?: string;
+  cookies?: SessionCookie[];
+  origins?: WebOrigin[];
+  /** One line about where it came from, if the agent wants to say. */
+  note?: string;
+}
+
+/**
+ * "Do this on the web for me."
+ *
+ * One item is the common case and a list is the reason this exists at all: an agent that has
+ * planned someone's morning has ten stops, and ten cards answered one at a time is a worse
+ * thing than one card with a list and a place to tick them off. The list is Turnstone-shaped
+ * on purpose — a row, a link, a note, a done mark — because that is the shape people already
+ * keep when they work through a queue of pages by hand.
+ *
+ * Nothing here is auto-answered. `autoAdvance` only moves the card's focus to the next row; the
+ * human still opens it, and still says it is done.
+ */
+export interface WebTaskProps {
+  items: WebTaskItem[];
+  title?: string;
+  /** One line above the list, for the shape of the whole thing. */
+  intro?: string;
+  /** Cookies and storage to carry into the embedded view, after the human approves them. */
+  session?: WebSession;
+  /** Where to open items. `browser` is forced wherever no embedded view exists. */
+  openIn?: WebTaskOpenIn;
+  /** Move the highlight to the next open row when one is marked done. Never opens it. */
+  autoAdvance?: boolean;
+  /** Whether a row may be skipped. Defaults to true. */
+  allowSkip?: boolean;
+  /** Offer a file control on each row, for a stop that ends in a download. */
+  returnFiles?: boolean;
+  submitLabel?: string;
+  help?: string;
+}
+
+/**
+ * A file the human handed back.
+ *
+ * Base64 without the `data:` prefix, like an `AudioClip`, because it travels inside the same
+ * JSON text frame as everything else. Capped well below the frame limit: the bridge refuses a
+ * frame over 16 MiB, and base64 inflates by a third.
+ */
+export interface ReturnedFile {
+  mime: string;
+  filename: string;
+  size: number;
+  data: string;
+}
+
+/** One row's state, in a progress signal and in the answer. */
+export interface WebTaskState {
+  id: string;
+  status: WebTaskItemStatus;
+  note?: string;
+  /** Where the human actually ended up on that row, when an embedded view was used. */
+  lastUrl?: string;
+  openedAt?: number;
+  completedAt?: number;
+  returnedFile?: ReturnedFile;
+}
+
+/** Who signed, as the human confirmed it. */
+export interface Signer {
+  name?: string;
+  email?: string;
+  /** ISO 8601, stamped by the canvas when they pressed send. */
+  signedAt?: string;
+}
+
+/** The kinds of thing an e-sign card can ask a human to put on a page. */
+export const ESIGN_FIELD_KINDS = ["text", "date", "initials", "signature", "checkbox"] as const;
+export type SignFieldKind = (typeof ESIGN_FIELD_KINDS)[number];
+
+/**
+ * One place on a page to write something.
+ *
+ * Coordinates are fractions of the page, origin top-left, the same language `RegionMark` uses
+ * for marks on a picture: the agent knows the page it sent, the canvas knows how large it drew
+ * it, and a fraction is the one coordinate both agree on without being told the other's size.
+ */
+export interface SignField {
+  id: string;
+  kind: SignFieldKind;
+  /** One-based. Defaults to 1. */
+  page?: number;
+  label?: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  required?: boolean;
+  /** A value to start from, for a name or a date the agent already knows. */
+  value?: string;
+}
+
+/** A PDF the agent supplies for the human to fill and sign. */
+export interface ESignDocument {
+  /** An `https:` URL, or a `data:application/pdf;base64,…` URL when the agent has the bytes. */
+  src: string;
+  filename?: string;
+  mime?: string;
+}
+
+/**
+ * "Sign this."
+ *
+ * Two modes, because there are two real situations. A provider link is a page at DocuSign or
+ * its kin: the human signs there, and what comes back is a confirmation plus whatever copy they
+ * attach. A document is the PDF itself, and the canvas can do better than that: it renders the
+ * pages, places the fields the agent declared (or the form's own), takes a drawn or typed
+ * signature, and hands back the filled bytes.
+ *
+ * A drawn signature is a visual mark, not a cryptographic one. This is a document-filling tool,
+ * not a notary, and the card says so rather than implying more.
+ */
+export interface ESignProps {
+  /** A signing link. Exactly one of `url` and `document` is required. */
+  url?: string;
+  /** The PDF itself: an `https:` URL or a `data:application/pdf;base64,…` URL. */
+  document?: ESignDocument;
+  /** Where to put fields. Omitted means the PDF's own form fields are used. */
+  fields?: SignField[];
+  /** Use the PDF's AcroForm widgets when it has them. Defaults to true. */
+  useAcroForm?: boolean;
+  /** Flatten the form into page content on the way out, so the values cannot be edited away. */
+  flatten?: boolean;
+  /** Prefill the "who is signing" line. */
+  signer?: { name?: string; email?: string };
+  title?: string;
+  intro?: string;
+  /** Offer "attach the signed copy" even in document mode. Defaults to true. */
+  returnSignedCopy?: boolean;
+  submitLabel?: string;
+  help?: string;
+  /** A provider link often needs the human's login, so the same session machinery applies. */
+  session?: WebSession;
+}
+
 export interface ComponentPropsMap {
   ActionCard: ActionCardProps;
   Notice: NoticeProps;
@@ -871,6 +1138,8 @@ export interface ComponentPropsMap {
   RegionMark: RegionMarkProps;
   PairMatrix: PairMatrixProps;
   AllocateBudget: AllocateBudgetProps;
+  WebTask: WebTaskProps;
+  ESign: ESignProps;
 }
 
 /**
@@ -889,6 +1158,8 @@ export type ComponentProps =
   | RegionMarkProps
   | PairMatrixProps
   | AllocateBudgetProps
+  | WebTaskProps
+  | ESignProps
   | Record<string, unknown>;
 
 export function propsFor<C extends ComponentName>(
@@ -1080,6 +1351,8 @@ export const COMPONENT_LABELS: Record<ComponentName, string> = {
   RegionMark: "Mark-up",
   PairMatrix: "Matching",
   AllocateBudget: "Split",
+  WebTask: "Web task",
+  ESign: "Signing",
 };
 
 /** One-line summary of what the human answered, shown on a resolved task card. */
@@ -1102,6 +1375,21 @@ export function summarizeAnswer(event: EventName, payload: unknown): string {
         return `Review sent: ${accepted} accepted, ${rejected} rejected`;
       }
       if (Array.isArray(p.shapes)) return describeShapes(p.shapes as unknown[]);
+      // A delegated web task answers with the whole board, so the receipt is the count rather
+      // than the thing that was on screen when the button was pressed.
+      if (Array.isArray(p.tasks)) {
+        const rows = p.tasks as WebTaskState[];
+        const done = rows.filter((row) => row.status === "done").length;
+        const skipped = rows.filter((row) => row.status === "skipped").length;
+        return `Web task sent: ${done} of ${rows.length} done${skipped > 0 ? `, ${skipped} skipped` : ""}`;
+      }
+      if (p.document && typeof p.document === "object") {
+        const filename = (p.document as { filename?: unknown }).filename;
+        return typeof filename === "string"
+          ? `Signed and returned ${filename}`
+          : "Signed and returned a document";
+      }
+      if (p.completed === true) return "Signing confirmed";
       if (p.pairs && typeof p.pairs === "object") {
         const n = Object.keys(p.pairs as object).length;
         const left = Array.isArray(p.unassigned) ? p.unassigned.length : 0;
@@ -1138,6 +1426,14 @@ export function summarizeAnswer(event: EventName, payload: unknown): string {
         const spent = values.reduce((sum, n) => sum + n, 0);
         const total = typeof p.total === "number" ? ` of ${p.total}` : "";
         return `Spent ${spent}${total} so far`;
+      }
+      if (Array.isArray(p.tasks)) {
+        const rows = p.tasks as WebTaskState[];
+        const done = rows.filter((row) => row.status === "done").length;
+        return `${done} of ${rows.length} done so far`;
+      }
+      if (typeof p.filled === "number" && typeof p.totalFields === "number") {
+        return `${p.filled} of ${p.totalFields} fields filled`;
       }
       if (Array.isArray(p.order)) return "Reordered";
       if (typeof p.name === "string" && p.value !== undefined) {

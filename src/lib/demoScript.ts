@@ -6,7 +6,7 @@ import { PROTOCOL_VERSION } from "./protocol";
  *
  * `npm run dev` in a browser has no Rust bridge and no agent, which makes the renderer
  * impossible to look at while you are working on it. This plays a realistic HITL session
- * covering all eleven component kinds, and answers each interaction with the next step the
+ * covering all thirteen component kinds, and answers each interaction with the next step the
  * way a real agent would. It is a development aid, never part of the desktop runtime.
  *
  * One rule shapes the whole script: **one card is one question**. A card that asks two things
@@ -363,6 +363,20 @@ const DASHBOARD_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="960" heigh
 /** The picture the mark-up question draws on: the bytes themselves, base64'd, as a data URL. */
 const DASHBOARD_IMAGE = `data:image/svg+xml;base64,${btoa(DASHBOARD_SVG)}`;
 
+/**
+ * A one-page lease with three real form fields in it, base64'd, as a data URL.
+ *
+ * Generated once with pdf-lib rather than hand-written, because a hand-written PDF is a byte-offset
+ * puzzle whose failure mode is an unopenable document, and the demo would then be showing an error
+ * card instead of the feature. It is inline for the same reason the dashboard above is: the demo has
+ * to run from a cleared checkout with no network and no files to find.
+ *
+ * It carries `tenant.name`, `tenant.date` and `tenant.agreed`, so the canvas discovers the fields
+ * the way it would with any real form — plus a signature the agent *declared* by coordinates, which
+ * is how a scanned lease with no form in it at all gets signed.
+ */
+const SAMPLE_LEASE_PDF = "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";
+
 /** The card that closes the demo, once the last of the three closing questions has landed. */
 function wrapUpFrame(): AgentFrame {
   return frame("task", {
@@ -376,7 +390,7 @@ function wrapUpFrame(): AgentFrame {
       bullets: [
         "Every answer you gave came back as a JSON event on the socket, not as a screenshot",
         "The chart data and the diff both came from the agent, so nothing on the canvas was invented",
-        "All eleven question kinds ran, and not one of them is a checkbox, a radio button or a dropdown",
+        "All thirteen question kinds ran, and not one of them is a checkbox, a radio button or a dropdown","You worked through a delegated list and signed a document without either one leaving this machine",
         "You drew on a picture, and it came back as vectors in fractions of it: marks, in order, not a screenshot",
         "Each card asked one question, so nothing was half-answered",
         "The choice, the row, the rating, the hunk and the last matrix row each answered themselves on the press",
@@ -454,6 +468,101 @@ function closingRun(): AgentFrame {
             { id: "docs", label: "Write up what we found", description: "So the next person does not repeat this" },
           ],
           help: "It has to add up to 40 before I can take it.",
+        },
+      },
+    ],
+  });
+}
+
+/**
+ * The two delegated kinds, asked as one run.
+ *
+ * Neither is answered by a press: one is a queue of pages to work through and the other is a
+ * document to sign, so they arrive together only because the agent needed both and neither depends
+ * on the other. The `session` is deliberately absent — in a browser there is no embedded view to
+ * hand a session to, and the demo should show what the cards do without one rather than pretend.
+ */
+function delegatedRun(): AgentFrame {
+  return frame("run", {
+    runId: "delegated",
+    instruction: "Two things I cannot do for you, and both of them need a person on the other end.",
+    questions: [
+      {
+        id: "fetch-documents",
+        component: "WebTask",
+        instruction:
+          "Three errands on the web. I have put the link for each one in the row, so you do not have " +
+          "to go looking — and tell me what happened on the ones you did.",
+        props: {
+          title: "Three stops, in any order",
+          intro:
+            "I have already filled in what I could. Each row says what counts as finished, and there " +
+            "is a box for notes on every one of them.",
+          allowSkip: true,
+          returnFiles: true,
+          submitLabel: "Send the list back",
+          items: [
+            {
+              id: "renew-insurance",
+              title: "Renew the car insurance",
+              url: "https://www.example.com/insurance/renew/8842",
+              note: "The quote is already at step three. Take the 12-month term, not the 6-month one.",
+              done: "a policy number is on the screen",
+            },
+            {
+              id: "pay-invoice",
+              title: "Pay the hosting invoice",
+              url: "https://www.example.com/billing/invoices/2291",
+              note: "Last month's receipt is in the same portal, under Billing → History.",
+              done: "the invoice shows as paid",
+            },
+            {
+              id: "book-slot",
+              title: "Book the delivery slot",
+              url: "https://www.example.com/deliveries/slots",
+              note: "Anything in the first half of next week works.",
+              done: "a slot is confirmed",
+              optional: true,
+            },
+          ],
+        },
+      },
+      {
+        id: "sign-renewal",
+        component: "ESign",
+        instruction:
+          "And the lease renewal: it needs your signature before the end of the month. I have put the " +
+          "document here so you can fill it in without going anywhere.",
+        props: {
+          title: "Residential lease renewal",
+          intro:
+            "The term is unchanged from last year. Name and date are the form's own fields; the " +
+            "signature is where I put it on the page.",
+          document: {
+            src: `data:application/pdf;base64,${SAMPLE_LEASE_PDF}`,
+            filename: "lease-renewal.pdf",
+            mime: "application/pdf",
+          },
+          signer: { name: "", email: "" },
+          fields: [
+            {
+              id: "tenant.signature",
+              kind: "signature",
+              page: 1,
+              label: "Signature",
+              // Fractions of the page, measured from the top left: the same coordinates a `RegionMark`
+              // sends back, so an agent that can say where a mark goes can say where a signature does.
+              x: 0.104,
+              y: 0.318,
+              w: 0.44,
+              h: 0.055,
+              required: true,
+            },
+          ],
+          flatten: true,
+          submitLabel: "Send the signed copy",
+          help:
+            "A drawn signature is drawn onto the page here, in this window: the document is never uploaded anywhere.",
         },
       },
     ],
@@ -921,7 +1030,6 @@ export function demoReply(
             kind: "progress",
           }),
         },
-        { delay: 200, frame: wrapUpFrame() },
       ];
     }
 
@@ -965,6 +1073,55 @@ export function demoReply(
             kind: "meta",
           }),
         },
+        { delay: 320, frame: delegatedRun() },
+      ];
+    }
+
+    // The two kinds that hand work over rather than ask a question about it. Neither can be
+    // answered by pressing one thing, so the scripted human behaves like a real one: it opens
+    // nothing, marks a row or two, writes a note, fills the document and sends it.
+    case "fetch-documents": {
+      if (event !== "submit") return [];
+      const tasks = Array.isArray(p.tasks) ? (p.tasks as Record<string, unknown>[]) : [];
+      const done = tasks.filter((row) => row.status === "done").length;
+      const skipped = tasks.filter((row) => row.status === "skipped").length;
+      const files = Object.keys((p.files ?? {}) as Record<string, unknown>).length;
+      return [
+        {
+          delay: 180,
+          frame: frame("note", {
+            text:
+              `List back: ${done} of ${tasks.length} done` +
+              (skipped > 0 ? `, ${skipped} skipped` : "") +
+              (files > 0 ? `, ${files} file${files === 1 ? "" : "s"} attached` : "") +
+              (typeof p.notes === "string" && p.notes.trim() !== ""
+                ? `. Your note: “${p.notes.trim()}”.`
+                : "."),
+            kind: "result",
+          }),
+        },
+      ];
+    }
+
+    case "sign-renewal": {
+      if (event !== "submit") return [];
+      const document = (p.document ?? null) as { filename?: string; size?: number } | null;
+      const filled = (p.fields ?? {}) as Record<string, string>;
+      return [
+        {
+          delay: 180,
+          frame: frame("note", {
+            text: document
+              ? `Signed copy received: ${document.filename ?? "a document"} (${Math.round(
+                  (document.size ?? 0) / 1024,
+                )} KB), filled in the canvas rather than on a server, with ${Object.keys(filled).length} field${
+                  Object.keys(filled).length === 1 ? "" : "s"
+                } carried alongside it.`
+              : "Signing confirmed, with no document attached. I will chase the copy if I need it.",
+            kind: "result",
+          }),
+        },
+        { delay: 420, frame: wrapUpFrame() },
       ];
     }
 

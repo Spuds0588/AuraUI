@@ -581,7 +581,7 @@ impl CanvasFrame {
 /// The component kinds v1 knows how to render. Mirrors `COMPONENT_NAMES` in protocol.ts and
 /// the list quoted in `docs/PROTOCOL.md`. The order is the order an agent sees in the
 /// `unknown_component` message, so all three have to agree on it.
-pub const COMPONENT_NAMES: [&str; 11] = [
+pub const COMPONENT_NAMES: [&str; 13] = [
     "ActionCard",
     "Notice",
     "WizardForm",
@@ -593,6 +593,8 @@ pub const COMPONENT_NAMES: [&str; 11] = [
     "RegionMark",
     "PairMatrix",
     "AllocateBudget",
+    "WebTask",
+    "ESign",
 ];
 
 pub fn is_known_component(name: &str) -> bool {
@@ -621,6 +623,11 @@ fn required_keys(component: &str) -> &'static [(&'static str, &'static str)] {
         "RegionMark" => &[("src", "string")],
         "PairMatrix" => &[("rows", "array"), ("options", "array")],
         "AllocateBudget" => &[("items", "array"), ("total", "number")],
+        "WebTask" => &[("items", "array")],
+        // `ESign` has two required keys depending on which mode it is in — a provider URL or a
+        // document — so the one-of rule lives in `validate_esign` rather than in a table that
+        // can only say "this key must exist".
+        "ESign" => &[],
         _ => &[],
     }
 }
@@ -697,6 +704,428 @@ pub fn validate_props(component: &str, props: &Value) -> Result<(), String> {
     }
     if component == "AllocateBudget" {
         validate_allocation(props)?;
+    }
+    if component == "WebTask" {
+        validate_web_task(props)?;
+    }
+    if component == "ESign" {
+        validate_esign(props)?;
+    }
+
+    Ok(())
+}
+
+/* ------------------------------------------------------------------ *
+ * Delegated web tasks
+ * ------------------------------------------------------------------ */
+
+/// How many items one `WebTask` may carry.
+///
+/// A list longer than this is not a day's work, it is a spreadsheet, and the card stops being
+/// something a person can see the end of. An agent with more to hand over should send a second
+/// card once the first is done, which also gives the human a place to stop.
+pub const WEBTASK_ITEM_LIMIT: usize = 32;
+
+/// The two ways a delegated task can be opened.
+pub const WEBTASK_OPEN_IN: [&str; 2] = ["embedded", "browser"];
+
+/// Caps on the session an agent may hand over.
+///
+/// These are not about performance. A session payload is a set of live credentials, and the
+/// thing this component makes easy is handing a real login to an embedded browser; a payload
+/// asking for thousands of cookies is not a session, it is a jar to be scraped, and it is
+/// refused before a window exists.
+pub const WEBTASK_SESSION_ORIGIN_LIMIT: usize = 32;
+pub const WEBTASK_SESSION_COOKIE_LIMIT: usize = 200;
+pub const WEBTASK_SESSION_STORAGE_LIMIT: usize = 200;
+pub const WEBTASK_SESSION_BYTES_LIMIT: usize = 256 * 1024;
+
+/// The kinds of field an `ESign` document may ask the human to fill.
+pub const ESIGN_FIELD_KINDS: [&str; 5] = ["text", "date", "initials", "signature", "checkbox"];
+
+/// How many fields one signature request may place, and how far into a document it may point.
+pub const ESIGN_FIELD_LIMIT: usize = 64;
+pub const ESIGN_PAGE_LIMIT: usize = 200;
+
+/// How large a document may be, in bytes.
+///
+/// The frame cap is 16 MiB and base64 inflates by a third, so a document the canvas fills and
+/// returns has to start well under half of it. A larger document is not carried as bytes: the
+/// agent sends a link instead, and the human signs it where it lives.
+pub const ESIGN_DOCUMENT_BYTES_LIMIT: usize = 8 * 1024 * 1024;
+
+/// The host part of a URL, with userinfo, port and IPv6 brackets taken off.
+fn host_of(url: &str) -> &str {
+    let rest = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let authority = authority.rsplit_once('@').map(|(_, h)| h).unwrap_or(authority);
+    if let Some(bracketed) = authority.strip_prefix('[') {
+        return bracketed.split(']').next().unwrap_or("");
+    }
+    authority.split(':').next().unwrap_or("")
+}
+
+pub fn is_loopback_host(host: &str) -> bool {
+    let host = host.to_ascii_lowercase();
+    host == "localhost" || host == "::1" || host.ends_with(".localhost") || host.starts_with("127.")
+}
+
+/// Check an address an agent wants a human to open.
+///
+/// `https` only, except on loopback, where `http` is allowed because the thing being delegated
+/// to is very often a tool running on this machine — and the bridge itself is loopback-only for
+/// the same reason.
+///
+/// Everything else is refused *by name*, because the interesting failures are the ones that
+/// look like a link: `javascript:` and `data:` are code wearing an address, and `file:` reads
+/// the human's disk from inside a card an agent asked them to trust. This is the same policy the
+/// embedded browser applies again when it opens the view; here it exists so a malformed task is
+/// refused with an error code and a sentence rather than becoming a card that cannot work.
+pub fn url_is_allowed(raw: &str) -> Result<(), String> {
+    let trimmed = raw.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.starts_with("https://") {
+        return Ok(());
+    }
+    if lower.starts_with("http://") {
+        let host = host_of(trimmed);
+        if is_loopback_host(host) {
+            return Ok(());
+        }
+        return Err(format!(
+            "`http://{host}` is refused for a delegated web task: it has to travel over https, unless it points at this machine (localhost, 127.0.0.1, ::1)."
+        ));
+    }
+    let scheme = lower.split([':', '/']).next().unwrap_or("");
+    Err(format!(
+        "`{scheme}:` is not an address for a delegated web task; it takes an `https:` URL."
+    ))
+}
+
+/// How many bytes a value occupies once serialized, for the session size cap.
+fn json_len(value: &Value) -> usize {
+    serde_json::to_string(value).map(|s| s.len()).unwrap_or(0)
+}
+
+/// Check one `WebTask` item.
+fn validate_web_task_item(item: &Value, index: usize, seen: &mut std::collections::HashSet<String>) -> Result<(), String> {
+    let Some(obj) = item.as_object() else {
+        return Err(format!(
+            "`props.items[{index}]` must be an object with an `id`, a `title` and a `url`."
+        ));
+    };
+
+    match obj.get("id").and_then(Value::as_str) {
+        Some(id) if !id.trim().is_empty() => {
+            if !seen.insert(id.to_string()) {
+                return Err(format!(
+                    "`props.items[{index}].id` is `{id}`, which is already used by an earlier item: an answer keyed by id could not say which one was done."
+                ));
+            }
+        }
+        _ => {
+            return Err(format!(
+                "`props.items[{index}].id` must be a non-empty string; an item with no id has nothing for the human's progress to be recorded against."
+            ))
+        }
+    }
+
+    match obj.get("title").and_then(Value::as_str) {
+        Some(title) if !title.trim().is_empty() => {}
+        _ => {
+            return Err(format!(
+                "`props.items[{index}].title` must be a non-empty string: a row in the list the human cannot read is a row they cannot decide about."
+            ))
+        }
+    }
+
+    match obj.get("url").and_then(Value::as_str) {
+        Some(url) => url_is_allowed(url).map_err(|e| format!("`props.items[{index}].url`: {e}"))?,
+        None => {
+            return Err(format!(
+                "`props.items[{index}].url` must be a string for WebTask."
+            ))
+        }
+    }
+
+    Ok(())
+}
+
+/// Check the session an agent wants carried into the embedded browser.
+fn validate_web_session(session: &Value) -> Result<(), String> {
+    let Some(obj) = session.as_object() else {
+        return Err("`props.session` must be an object when it is present for WebTask.".into());
+    };
+
+    if let Some(origins) = obj.get("origins") {
+        let Some(items) = origins.as_array() else {
+            return Err("`props.session.origins` must be an array for WebTask.".into());
+        };
+        if items.len() > WEBTASK_SESSION_ORIGIN_LIMIT {
+            return Err(format!(
+                "`props.session.origins` has {} entries for WebTask, and the cap is {WEBTASK_SESSION_ORIGIN_LIMIT}: a session names the sites it is for, it is not a cookie jar.",
+                items.len()
+            ));
+        }
+        for (index, origin) in items.iter().enumerate() {
+            let Some(origin) = origin.as_object() else {
+                return Err(format!(
+                    "`props.session.origins[{index}]` must be an object with an `origin`."
+                ));
+            };
+            match origin.get("origin").and_then(Value::as_str) {
+                Some(value) if !value.trim().is_empty() => {}
+                _ => {
+                    return Err(format!(
+                        "`props.session.origins[{index}].origin` must be a non-empty string, and it has to be the full origin (`https://example.com`): the canvas seeds `localStorage` by exact origin match."
+                    ))
+                }
+            }
+            if let Some(storage) = origin.get("localStorage") {
+                let Some(entries) = storage.as_array() else {
+                    return Err(format!(
+                        "`props.session.origins[{index}].localStorage` must be an array of `{{ name, value }}` pairs."
+                    ));
+                };
+                if entries.len() > WEBTASK_SESSION_STORAGE_LIMIT {
+                    return Err(format!(
+                        "`props.session.origins[{index}].localStorage` has {} entries, and the cap is {WEBTASK_SESSION_STORAGE_LIMIT}.",
+                        entries.len()
+                    ));
+                }
+                for (entry_index, entry) in entries.iter().enumerate() {
+                    let valid = entry
+                        .as_object()
+                        .map(|e| e.get("name").and_then(Value::as_str).is_some_and(|n| !n.is_empty()))
+                        .unwrap_or(false);
+                    if !valid {
+                        return Err(format!(
+                            "`props.session.origins[{index}].localStorage[{entry_index}]` must be an object with a non-empty `name`, and it may carry a `value`."
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(cookies) = obj.get("cookies") {
+        let Some(items) = cookies.as_array() else {
+            return Err("`props.session.cookies` must be an array for WebTask.".into());
+        };
+        if items.len() > WEBTASK_SESSION_COOKIE_LIMIT {
+            return Err(format!(
+                "`props.session.cookies` has {} entries for WebTask, and the cap is {WEBTASK_SESSION_COOKIE_LIMIT}.",
+                items.len()
+            ));
+        }
+        for (index, cookie) in items.iter().enumerate() {
+            let Some(cookie) = cookie.as_object() else {
+                return Err(format!(
+                    "`props.session.cookies[{index}]` must be an object with `name`, `value` and `domain`."
+                ));
+            };
+            for key in ["name", "value", "domain"] {
+                match cookie.get(key).and_then(Value::as_str) {
+                    Some(value) if key == "value" || !value.trim().is_empty() => {}
+                    _ => {
+                        return Err(format!(
+                            "`props.session.cookies[{index}].{key}` must be a string; a cookie without a {key} cannot be placed in the browser, and placing one at the wrong domain would leak a credential."
+                        ))
+                    }
+                }
+            }
+            // A cookie has to name a domain, and the shell checks the item's host against it
+            // before anything is placed, so a session for `bank.example` is never handed to a
+            // page on `shop.example` just because both arrived in one card.
+        }
+    }
+
+    // A session exists to be shown before it is handed over, and what is shown is the list of
+    // sites it is for. A payload that names none of them has nothing to ask consent about, so
+    // it is refused rather than injected on the strength of a label.
+    let names_a_site = obj
+        .get("origins")
+        .and_then(Value::as_array)
+        .is_some_and(|items| !items.is_empty())
+        || obj
+            .get("cookies")
+            .and_then(Value::as_array)
+            .is_some_and(|items| !items.is_empty());
+    if !names_a_site {
+        return Err(
+            "`props.session` names no origins and carries no cookies: there is nothing to hand over, and nothing for the human to be asked about."
+                .into(),
+        );
+    }
+
+    if json_len(session) > WEBTASK_SESSION_BYTES_LIMIT {
+        return Err(format!(
+            "`props.session` is larger than {} KiB. A session is a set of credentials, not a payload: hand over the few entries the site actually needs.",
+            WEBTASK_SESSION_BYTES_LIMIT / 1024
+        ));
+    }
+
+    Ok(())
+}
+
+/// Check a `WebTask`'s list and the session it wants carried over.
+fn validate_web_task(props: &Value) -> Result<(), String> {
+    let Some(obj) = props.as_object() else {
+        return Ok(());
+    };
+
+    let Some(items) = obj.get("items").and_then(Value::as_array) else {
+        return Ok(());
+    };
+    if items.is_empty() {
+        return Err(
+            "`props.items` is empty: a delegated web task with nothing in it is a card with no work in it."
+                .into(),
+        );
+    }
+    if items.len() > WEBTASK_ITEM_LIMIT {
+        return Err(format!(
+            "`props.items` has {} entries for WebTask, and the cap is {WEBTASK_ITEM_LIMIT}. Send a second card when the first is done rather than one list nobody can see the end of.",
+            items.len()
+        ));
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    for (index, item) in items.iter().enumerate() {
+        validate_web_task_item(item, index, &mut seen)?;
+    }
+
+    if let Some(open_in) = obj.get("openIn") {
+        match open_in.as_str() {
+            Some(value) if WEBTASK_OPEN_IN.contains(&value) => {}
+            _ => {
+                return Err(format!(
+                    "`props.openIn` must be one of {} for WebTask.",
+                    WEBTASK_OPEN_IN.join(", ")
+                ))
+            }
+        }
+    }
+
+    if let Some(session) = obj.get("session") {
+        if !session.is_null() {
+            validate_web_session(session)?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Check a signature request: exactly one target, and fields that can actually be drawn.
+fn validate_esign(props: &Value) -> Result<(), String> {
+    let Some(obj) = props.as_object() else {
+        return Ok(());
+    };
+
+    let has_url = obj.get("url").is_some_and(|v| !v.is_null());
+    let has_document = obj.get("document").is_some_and(|v| !v.is_null());
+    if !has_url && !has_document {
+        return Err(
+            "ESign needs either `props.url` (a signing link) or `props.document` (the PDF to fill and sign); it has neither."
+                .into(),
+        );
+    }
+    if has_url && has_document {
+        // Both clients refuse this too, but the bridge is the gate: a card holding both would have
+        // to pick which one the human signs, and an answer about the wrong document looks exactly
+        // like an answer about the right one.
+        return Err(
+            "ESign takes `props.url` or `props.document`, not both: send the provider link, or the PDF to fill, and the card knows what it is asking for."
+                .into(),
+        );
+    }
+
+    if has_url {
+        match obj.get("url").and_then(Value::as_str) {
+            Some(url) => url_is_allowed(url).map_err(|e| format!("`props.url`: {e}"))?,
+            None => return Err("`props.url` must be a string for ESign.".into()),
+        }
+    }
+
+    if has_document {
+        let Some(document) = obj.get("document").and_then(Value::as_object) else {
+            return Err("`props.document` must be an object with a `src` for ESign.".into());
+        };
+        let Some(src) = document.get("src").and_then(Value::as_str) else {
+            return Err("`props.document.src` must be a string for ESign.".into());
+        };
+        if let Some(rest) = src.strip_prefix("data:") {
+            if !rest.starts_with("application/pdf") {
+                return Err(
+                    "`props.document.src` is a data URL that is not a PDF; ESign fills PDF documents."
+                        .into(),
+                );
+            }
+            let bytes = src.len();
+            if bytes > (ESIGN_DOCUMENT_BYTES_LIMIT * 4 / 3) + 1024 {
+                return Err(format!(
+                    "`props.document.src` is about {} MiB of base64, and the cap is {} MiB of PDF: send a link instead of the bytes.",
+                    bytes / (1024 * 1024),
+                    ESIGN_DOCUMENT_BYTES_LIMIT / (1024 * 1024)
+                ));
+            }
+        } else {
+            url_is_allowed(src).map_err(|e| format!("`props.document.src`: {e}"))?;
+        }
+    }
+
+    if let Some(fields) = obj.get("fields") {
+        let Some(items) = fields.as_array() else {
+            return Err("`props.fields` must be an array of fields for ESign.".into());
+        };
+        if items.len() > ESIGN_FIELD_LIMIT {
+            return Err(format!(
+                "`props.fields` has {} entries for ESign, and the cap is {ESIGN_FIELD_LIMIT}.",
+                items.len()
+            ));
+        }
+        for (index, field) in items.iter().enumerate() {
+            let Some(field) = field.as_object() else {
+                return Err(format!(
+                    "`props.fields[{index}]` must be an object with an `id`, a `kind` and a rectangle."
+                ));
+            };
+            match field.get("id").and_then(Value::as_str) {
+                Some(id) if !id.trim().is_empty() => {}
+                _ => {
+                    return Err(format!(
+                        "`props.fields[{index}].id` must be a non-empty string; a field with no name has nothing to key the human's answer against."
+                    ))
+                }
+            }
+            match field.get("kind").and_then(Value::as_str) {
+                Some(kind) if ESIGN_FIELD_KINDS.contains(&kind) => {}
+                _ => {
+                    return Err(format!(
+                        "`props.fields[{index}].kind` must be one of {} for ESign.",
+                        ESIGN_FIELD_KINDS.join(", ")
+                    ))
+                }
+            }
+            let page = field.get("page").and_then(Value::as_i64).unwrap_or(1);
+            if page < 1 || page > ESIGN_PAGE_LIMIT as i64 {
+                return Err(format!(
+                    "`props.fields[{index}].page` is {page}; pages are numbered from 1, and this takes up to {ESIGN_PAGE_LIMIT}."
+                ));
+            }
+            // Fractions of the page, the same coordinate language `RegionMark` uses: the agent
+            // knows the page, the canvas knows how large it drew it, and neither has to be told
+            // the other's size.
+            for key in ["x", "y", "w", "h"] {
+                let value = field.get(key).and_then(Value::as_f64);
+                let valid = value.is_some_and(|v| v >= 0.0 && v <= 1.0);
+                if !valid {
+                    return Err(format!(
+                        "`props.fields[{index}].{key}` must be a number between 0 and 1, as a fraction of the page."
+                    ));
+                }
+            }
+        }
     }
 
     Ok(())
@@ -1833,5 +2262,182 @@ mod tests {
         assert!(budget(json!({"total": 100, "items": items, "requireTotal": "yes"})).is_err());
 
         assert!(is_known_component("AllocateBudget"));
+    }
+
+    #[test]
+    fn validates_delegated_web_tasks_a_person_could_work_through() {
+        let web = |props: Value| validate_props("WebTask", &props);
+        let item = json!({
+            "id": "renew-car",
+            "title": "Renew the car insurance",
+            "url": "https://portal.example.com/renew/8842",
+            "note": "Quote is at step 3.",
+            "done": "a policy number is on screen"
+        });
+
+        assert!(web(json!({"items": [item.clone()]})).is_ok());
+        // A single local tool is a legitimate target, and the loopback exception is the reason.
+        assert!(web(json!({
+            "items": [{"id": "a", "title": "Tidy the inbox", "url": "http://localhost:8000/inbox"}]
+        }))
+        .is_ok());
+        assert!(web(json!({
+            "items": [item.clone()],
+            "openIn": "browser",
+            "autoAdvance": false,
+            "allowSkip": true,
+            "submitLabel": "Send back"
+        }))
+        .is_ok());
+
+        assert!(web(json!({"items": []})).is_err());
+        assert!(web(json!({})).is_err());
+
+        // Every way an item can be unrenderable, refused where it can still be explained.
+        assert!(web(json!({"items": [{"title": "x", "url": "https://a.example"}]})).is_err());
+        assert!(web(json!({"items": [{"id": "a", "title": "", "url": "https://a.example"}]})).is_err());
+        assert!(web(json!({"items": [{"id": "a", "title": "x"}]})).is_err());
+        assert!(web(json!({"items": [{"id": "a", "title": "x", "url": "http://a.example"}]})).is_err());
+        assert!(web(json!({
+            "items": [{"id": "a", "title": "x", "url": "javascript:alert(1)"}]
+        }))
+        .is_err());
+        assert!(web(json!({
+            "items": [{"id": "a", "title": "x", "url": "file:///etc/passwd"}]
+        }))
+        .is_err());
+        // Two rows with one id cannot be reported on separately, and the human's progress would
+        // land on whichever of them the canvas found first.
+        assert!(web(json!({"items": [item.clone(), item.clone()]})).is_err());
+        assert!(web(json!({"items": [item], "openIn": "sideways"})).is_err());
+
+        let many: Vec<Value> = (0..WEBTASK_ITEM_LIMIT + 1)
+            .map(|i| json!({"id": format!("t{i}"), "title": "x", "url": "https://a.example"}))
+            .collect();
+        let refusal = web(json!({"items": many})).expect_err("a list nobody can see the end of");
+        assert!(refusal.contains(&WEBTASK_ITEM_LIMIT.to_string()));
+    }
+
+    #[test]
+    fn validates_a_session_before_anything_is_handed_over() {
+        let web = |session: Value| {
+            validate_props(
+                "WebTask",
+                &json!({
+                    "items": [{"id": "a", "title": "x", "url": "https://bank.example/x"}],
+                    "session": session
+                }),
+            )
+        };
+
+        let cookie = json!({
+            "name": "sid", "value": "v", "domain": ".bank.example",
+            "path": "/", "secure": true, "httpOnly": true, "sameSite": "lax"
+        });
+        assert!(web(json!({
+            "label": "your bank login",
+            "cookies": [cookie.clone()],
+            "origins": [{"origin": "https://bank.example", "localStorage": [{"name": "t", "value": "1"}]}]
+        }))
+        .is_ok());
+
+        // A session has to name where it goes: that list is what the human is shown, and a
+        // payload with nothing to show cannot be consented to.
+        assert!(web(json!({"label": "somewhere"})).is_err());
+        assert!(web(json!({"origins": []})).is_err());
+        // A cookie with no domain could be placed at whichever host the card happened to open.
+        assert!(web(json!({
+            "cookies": [{"name": "sid", "value": "v"}]
+        }))
+        .is_err());
+        assert!(web(json!({
+            "cookies": [{"name": "", "value": "v", "domain": "a.example"}]
+        }))
+        .is_err());
+        assert!(web(json!({
+            "cookies": [{"name": "a", "value": "v", "domain": ""}]
+        }))
+        .is_err());
+        assert!(web(json!({"cookies": "lots"})).is_err());
+        assert!(web(json!({"origins": [{"localStorage": []}]})).is_err());
+        assert!(web(json!({"origins": [{"origin": "https://a.example", "localStorage": [{}]}]})).is_err());
+
+        let too_many: Vec<Value> = (0..WEBTASK_SESSION_COOKIE_LIMIT + 1)
+            .map(|i| json!({"name": format!("c{i}"), "value": "v", "domain": "a.example"}))
+            .collect();
+        assert!(web(json!({"cookies": too_many})).is_err());
+
+        // A payload big enough to be a scrape rather than a session.
+        let huge = "x".repeat(WEBTASK_SESSION_BYTES_LIMIT + 1);
+        assert!(web(json!({
+            "origins": [{"origin": "https://a.example", "localStorage": [{"name": "t", "value": huge}]}]
+        }))
+        .is_err());
+    }
+
+    #[test]
+    fn validates_signature_requests() {
+        let sign = |props: Value| validate_props("ESign", &props);
+        let field = json!({
+            "id": "sig", "page": 3, "kind": "signature", "label": "Sign here",
+            "x": 0.12, "y": 0.72, "w": 0.3, "h": 0.06, "required": true
+        });
+
+        assert!(sign(json!({"url": "https://sign.example.com/envelope/9f3"})).is_ok());
+        let pdf = format!("data:application/pdf;base64,{}", "A".repeat(2048));
+        assert!(sign(json!({
+            "document": {"src": pdf, "filename": "lease.pdf", "mime": "application/pdf"},
+            "fields": [field.clone()],
+            "useAcroForm": true,
+            "flatten": true,
+            "signer": {"name": "A Person", "email": "a@b.example"}
+        }))
+        .is_ok());
+
+        // Neither target: nothing to sign, so nothing to ask. Both targets: the card would have
+        // to choose which one the human is signing, and it is not the card's choice to make.
+        assert!(sign(json!({})).is_err());
+        let both = sign(json!({
+            "url": "https://sign.example.com/envelope/9f3",
+            "document": {"src": format!("data:application/pdf;base64,{}", "A".repeat(2048))}
+        }))
+        .expect_err("two targets in one card");
+        assert!(both.contains("not both"), "{both}");
+        assert!(sign(json!({"url": "http://sign.example.com/x"})).is_err());
+        assert!(sign(json!({"document": {"src": "data:text/html,<b>hi</b>"}})).is_err());
+        assert!(sign(json!({"document": {"src": "file:///tmp/lease.pdf"}})).is_err());
+        assert!(sign(json!({"document": {}})).is_err());
+        assert!(sign(json!({"document": "lease.pdf"})).is_err());
+
+        // A field the canvas could not draw, refused by name.
+        assert!(sign(json!({
+            "url": "https://sign.example.com/x",
+            "fields": [{"id": "a", "kind": "hovercraft", "x": 0.1, "y": 0.1, "w": 0.1, "h": 0.1}]
+        }))
+        .is_err());
+        assert!(sign(json!({"url": "https://sign.example.com/x", "fields": [field.clone()], "nope": 1})).is_ok());
+        assert!(sign(json!({
+            "url": "https://sign.example.com/x",
+            "fields": [{"id": "a", "kind": "text", "page": 0, "x": 0.1, "y": 0.1, "w": 0.1, "h": 0.1}]
+        }))
+        .is_err());
+        assert!(sign(json!({
+            "url": "https://sign.example.com/x",
+            "fields": [{"id": "a", "kind": "text", "x": 1.4, "y": 0.1, "w": 0.1, "h": 0.1}]
+        }))
+        .is_err());
+        assert!(sign(json!({
+            "url": "https://sign.example.com/x",
+            "fields": [{"id": "", "kind": "text", "x": 0.1, "y": 0.1, "w": 0.1, "h": 0.1}]
+        }))
+        .is_err());
+
+        // Bytes too large to travel inside a frame, said so rather than truncated.
+        let enormous = format!("data:application/pdf;base64,{}", "A".repeat(ESIGN_DOCUMENT_BYTES_LIMIT * 2));
+        let refusal = sign(json!({"document": {"src": enormous}})).expect_err("too big to carry");
+        assert!(refusal.contains("send a link"), "{refusal}");
+
+        assert!(is_known_component("WebTask"));
+        assert!(is_known_component("ESign"));
     }
 }

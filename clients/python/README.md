@@ -211,6 +211,19 @@ c.pair_row(id, label, description=None, options=None)
 c.pair_matrix(rows, options, require_all=None, submit_label=None, help=None)
 c.allocation_item(id, label, description=None, min=None)
 c.allocate_budget(items, total, step=None, require_total=None, submit_label=None, help=None)
+
+c.web_task_item(id, title, url, note=None, done=None, optional=None)
+c.session_cookie(name, value, domain, path=None, secure=None, http_only=None,
+                 same_site=None, expires=None)
+c.web_origin(origin, local_storage=None)
+c.web_session(cookies=None, origins=None, label=None, note=None)
+c.web_task(items, title=None, intro=None, session=None, open_in=None, auto_advance=None,
+           allow_skip=None, return_files=None, submit_label=None, help=None)
+
+c.sign_field(id, kind, x=, y=, w=, h=, page=None, label=None, required=None, value=None)
+c.esign(url=None, document=None, fields=None, use_acro_form=None, flatten=None,
+        signer=None, title=None, intro=None, return_signed_copy=None,
+        submit_label=None, help=None, session=None)
 ```
 
 Python arguments are snake_case; the JSON on the wire stays camelCase (`defaultValue`,
@@ -380,6 +393,96 @@ terminal ``submit`` with ``{component, decisions, accepted, rejected}``, where `
 and ``rejected`` hold the hunk ids in the order you sent them. There is no ``submit_label``
 and no submit button.
 
+## WebTask: hand it over
+
+The one thing here that is not answered by pressing something. The agent sends a URL, or a list of
+them, and the human does the work in an embedded browser inside the card, leaving a note per row
+and pressing send when the list is where they want it.
+
+```python
+answer = agent.task(
+    component="WebTask",
+    instruction="Three things before the office closes. Each one needs the portal login.",
+    props=c.web_task(
+        [
+            c.web_task_item("renew-insurance", "Renew the car insurance",
+                            "https://portal.example.com/renew/8842",
+                            note="Quote is at step three. Take the 12-month term.",
+                            done="a policy number is on the screen"),
+            c.web_task_item("pay-invoice", "Pay invoice 4471",
+                            "https://billing.example.com/invoices/4471",
+                            done="the page says paid"),
+        ],
+        title="Three stops, in any order",
+        session=c.web_session(
+            cookies=[c.session_cookie("sid", token, ".example.com", secure=True, http_only=True)],
+            label="your portal login",
+        ),
+        return_files=True,
+    ),
+    timeout=3 * 60 * 60,
+)
+for task in answer["payload"]["tasks"]:
+    print(task["id"], task["status"], task.get("note", ""))
+```
+
+``done`` is the agent's sentence for what finished looks like, drawn under the row. Send it: "complete"
+with no definition is the failure mode of every delegated task. Progress arrives as non-terminal
+``change`` carrying the **whole board** (``tasks``, ``opened``, ``done``, ``total``), the same reason
+an ``AllocateBudget`` sends every line.
+
+The answer's ``tasks`` has every row, ``skipped`` names the ones the human chose not to do, and
+``lastUrl`` says where each one ended up — which is how you learn a login bounced them to a home
+page without asking them to explain it. Files attached per row come back under ``files`` when
+``return_files=True``.
+
+``session`` is ``storageState``-shaped, so a dump from your own automation is a valid argument. It
+is placed in the embedded browser only after the human is shown the exact origins and says yes, and
+it never comes back out. ``openIn="browser"`` skips the embedded view entirely and hands each URL
+to their browser; that is also what happens on the phone and in the scripted demo, without being
+asked for.
+
+A row's state is kept in the canvas under the task id, so re-sending the same ``taskId`` resumes the
+list rather than resetting it.
+
+## ESign: sign this
+
+The same surface for a signature. Two forms, and exactly one of them:
+
+```python
+# A provider's signing page: the human signs there, the card collects a confirmation.
+answer = agent.task(
+    component="ESign",
+    instruction="The lease renewal is ready for your signature.",
+    props=c.esign(url="https://sign.example.com/envelope/9f3c1a02", title="Lease renewal"),
+)
+
+# Or the document itself: the canvas renders it, fills it and hands the bytes back.
+answer = agent.task(
+    component="ESign",
+    instruction="Sign page 3 and date it.",
+    props=c.esign(
+        document={"src": "https://files.example.com/lease.pdf", "filename": "lease.pdf"},
+        fields=[
+            c.sign_field("sig", "signature", x=0.12, y=0.72, w=0.30, h=0.06,
+                         page=3, label="Sign here"),
+            c.sign_field("dated", "date", x=0.12, y=0.80, w=0.20, h=0.04, page=3),
+        ],
+        return_signed_copy=True,
+    ),
+)
+signed = answer["payload"]["document"]   # {"filename", "mime", "size", "data": "<base64>"}
+```
+
+Coordinates are fractions of the page from the top left, the same language ``RegionMark`` uses for
+marks on a picture, and ``page`` is one-based. Fields already in the PDF's own form are picked up by
+name and merged with the ones you send, so ``fields`` is mostly for the documents that have no form
+at all — which is most of what a person is asked to sign.
+
+Nothing is uploaded: pdf.js renders, pdf-lib writes, and the signed bytes come back through the
+answer. ``flatten=False`` keeps the AcroForm usable afterwards if the next stop in the process needs
+to fill it too.
+
 ## Frame reference
 
 One JSON object per WebSocket text message, protocol version `1.0`.
@@ -415,11 +518,12 @@ leaving you blocked.
 
 Components: `ActionCard`, `Notice`, `WizardForm`, `SortableList`, `DataGrid`,
 `InteractiveChart`, `RatingScale`, `DiffReview`, `RegionMark`, `PairMatrix`,
-`AllocateBudget`. The full prop shape of each is documented in `docs/PROTOCOL.md`.
+`AllocateBudget`, `WebTask`, `ESign`. The full prop shape of each is documented in
+`docs/PROTOCOL.md`.
 
 ## What the agent must not do
 
-- **Never send HTML, CSS, JavaScript or frontend code.** AuraUI renders eleven fixed
+- **Never send HTML, CSS, JavaScript or frontend code.** AuraUI renders thirteen fixed
   components from structured props. There is no arbitrary-code path, by design: an agent
   that can inject markup can break the window it is asking for help in.
 - **Never put numbers in a chart spec.** Send a Vega-Lite schema whose `data` is the named

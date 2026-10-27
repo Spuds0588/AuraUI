@@ -207,6 +207,15 @@ c.pairRow(id, label, { description, options })
 c.pairMatrix(rows, options, { requireAll, submitLabel, help })
 c.allocationItem(id, label, { description, min })
 c.allocateBudget(items, total, { step, requireTotal, submitLabel, help })
+
+c.webTaskItem(id, title, url, { note, done, optional })
+c.sessionCookie(name, value, domain, extra?)
+c.webSession({ cookies, origins, label, note })
+c.webTask(items, { title, intro, session, openIn, autoAdvance, allowSkip, returnFiles,
+                    submitLabel, help })
+c.signField(id, kind, { x, y, w, h, page, label, required, value })
+c.esign({ url, document, fields, useAcroForm, flatten, signer, title, intro,
+          returnSignedCopy, submitLabel, help, session })
 ```
 
 A wizard field is one of `text`, `textarea`, `number`, `date`, `choice` or `multi`. `choice`
@@ -373,6 +382,94 @@ console.log(answer.payload.total); // 40
 than `total` throw here and are refused by the bridge: that card could never reach its own
 total, so it could never be sent.
 
+## WebTask: hand it over
+
+The one component here that is not answered by pressing something. The agent sends a URL, or a list
+of them, and the human does the work in an embedded browser inside the card, leaves a note per row,
+and presses send when the list is where they want it.
+
+```js
+const answer = await agent.task({
+  component: "WebTask",
+  instruction: "Three things before the office closes. Each one needs the portal login.",
+  timeoutMs: 3 * 60 * 60 * 1000,
+  props: c.webTask(
+    [
+      c.webTaskItem("renew-insurance", "Renew the car insurance",
+        "https://portal.example.com/renew/8842",
+        { note: "Quote is at step three. Take the 12-month term.",
+          done: "a policy number is on the screen" }),
+      c.webTaskItem("pay-invoice", "Pay invoice 4471",
+        "https://billing.example.com/invoices/4471", { done: "the page says paid" }),
+    ],
+    {
+      title: "Three stops, in any order",
+      session: c.webSession({
+        cookies: [c.sessionCookie("sid", token, ".example.com", { secure: true, httpOnly: true })],
+        label: "your portal login",
+      }),
+      returnFiles: true,
+    },
+  ),
+});
+for (const task of answer.payload.tasks) console.log(task.id, task.status, task.note ?? "");
+```
+
+`done` is the agent's sentence for what finished looks like, drawn under the row. Send it:
+"complete" with no definition is the failure mode of every delegated task. Progress arrives as
+non-terminal `change` carrying the **whole board** (`tasks`, `opened`, `done`, `total`), the same
+reason an `allocateBudget` sends every line.
+
+The answer's `tasks` has every row, `skipped` names the ones the human chose not to do, and
+`lastUrl` says where each one ended up — which is how you learn a login bounced them to a home page
+without asking them to explain it. Files attached per row come back under `files` when
+`returnFiles: true`.
+
+`session` is `storageState`-shaped, so a dump from your own automation is a valid argument. It is
+placed in the embedded browser only after the human is shown the exact origins and says yes, and it
+never comes back out. `openIn: "browser"` skips the embedded view entirely and hands each URL to
+their browser; that is also what happens on the phone and in the scripted demo, without being asked
+for.
+
+A row's state is kept in the canvas under the task id, so re-sending the same `taskId` resumes the
+list rather than resetting it.
+
+## ESign: sign this
+
+The same surface for a signature. Two forms, and exactly one of them:
+
+```js
+// A provider's signing page: the human signs there, the card collects a confirmation.
+await agent.task({
+  component: "ESign",
+  instruction: "The lease renewal is ready for your signature.",
+  props: c.esign({ url: "https://sign.example.com/envelope/9f3c1a02", title: "Lease renewal" }),
+});
+
+// Or the document itself: the canvas renders it, fills it and hands the bytes back.
+const { payload } = await agent.task({
+  component: "ESign",
+  instruction: "Sign page 3 and date it.",
+  props: c.esign({
+    document: { src: "https://files.example.com/lease.pdf", filename: "lease.pdf" },
+    fields: [
+      c.signField("sig", "signature", { x: 0.12, y: 0.72, w: 0.3, h: 0.06, page: 3, label: "Sign here" }),
+      c.signField("dated", "date", { x: 0.12, y: 0.8, w: 0.2, h: 0.04, page: 3 }),
+    ],
+  }),
+});
+payload.document; // { filename, mime, size, data: "<base64>" }
+```
+
+Coordinates are fractions of the page from the top left, the same language `regionMark` uses for
+marks on a picture, and `page` is one-based. Fields already in the PDF's own form are picked up by
+name and merged with the ones you send, so `fields` is mostly for the documents that have no form at
+all — which is most of what a person is asked to sign.
+
+Nothing is uploaded: pdf.js renders, pdf-lib writes, and the signed bytes come back through the
+answer. `flatten: false` keeps the AcroForm usable afterwards if the next stop in the process needs
+to fill it too.
+
 ## Frame reference
 
 One JSON object per WebSocket text message, protocol version `1.0`.
@@ -404,12 +501,12 @@ leaving you waiting.
 
 Components: `ActionCard`, `Notice`, `WizardForm`, `SortableList`, `DataGrid`,
 `InteractiveChart`, `RatingScale`, `DiffReview`, `RegionMark`, `PairMatrix`,
-`AllocateBudget`. The full prop shape of each is in `auraui-client.d.ts` and in
-`docs/PROTOCOL.md`.
+`AllocateBudget`, `WebTask`, `ESign`. The full prop shape of each is in `auraui-client.d.ts`
+and in `docs/PROTOCOL.md`.
 
 ## What the agent must not do
 
-- **Never send HTML, CSS, JavaScript or frontend code.** AuraUI renders eleven fixed
+- **Never send HTML, CSS, JavaScript or frontend code.** AuraUI renders thirteen fixed
   components from structured props. There is no arbitrary-code path, by design: an agent
   that can inject markup can break the window it is asking for help in.
 - **Never put numbers in a chart spec.** Send a Vega-Lite schema whose `data` is the named

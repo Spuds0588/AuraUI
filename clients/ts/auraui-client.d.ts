@@ -822,6 +822,188 @@ export declare function allocateBudget(
   extra?: { step?: number; requireTotal?: boolean; submitLabel?: string; help?: string },
 ): AllocateBudgetProps;
 
+/* ------------------------------------------------------------------ *
+ * Delegated web tasks
+ * ------------------------------------------------------------------ */
+
+/** One cookie from the session the agent was using. */
+export interface SessionCookie {
+  name: string;
+  value: string;
+  domain: string;
+  path?: string;
+  secure?: boolean;
+  /** Works: the canvas places cookies through the host's cookie API, not `document.cookie`. */
+  httpOnly?: boolean;
+  sameSite?: "lax" | "strict" | "none";
+  /** Unix seconds. Absent means a session cookie that dies with the run. */
+  expires?: number;
+}
+
+/** One origin's `localStorage`, seeded before the page's own scripts run. */
+export interface WebOrigin {
+  origin: string;
+  localStorage?: { name: string; value: string }[];
+}
+
+/**
+ * What is handed to the embedded view so the human carries on where the agent stopped.
+ *
+ * Deliberately the shape a browser automation library already holds: cookies plus per-origin
+ * storage. Every origin in it is shown to the human, by name, before anything is placed.
+ */
+export interface WebSession {
+  label?: string;
+  note?: string;
+  cookies?: SessionCookie[];
+  origins?: WebOrigin[];
+}
+
+/** One stop on a delegated list. */
+export interface WebTaskItem {
+  id: string;
+  title: string;
+  /** https, or http on this machine. */
+  url: string;
+  /** The agent's instructions for this stop. */
+  note?: string;
+  /** What finished looks like here, in the agent's words. */
+  done?: string;
+  optional?: boolean;
+}
+
+/** Props for a `WebTask`: one row or a whole queue of them. */
+export interface WebTaskProps {
+  items: WebTaskItem[];
+  title?: string;
+  intro?: string;
+  session?: WebSession;
+  /** Where to open rows. `browser` is forced wherever no embedded view exists. */
+  openIn?: "embedded" | "browser";
+  /** Move the eye to the next open row when one is marked done. Never opens it. */
+  autoAdvance?: boolean;
+  allowSkip?: boolean;
+  /** Offer a file control per row, for a stop that ends in a download. */
+  returnFiles?: boolean;
+  submitLabel?: string;
+  help?: string;
+}
+
+/** The kinds of field a signature request can place. */
+export type SignFieldKind = "text" | "date" | "initials" | "signature" | "checkbox";
+
+/** One place on a page to write something, as fractions of the page from the top left. */
+export interface SignField {
+  id: string;
+  kind: SignFieldKind;
+  page?: number;
+  label?: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  required?: boolean;
+  value?: string;
+}
+
+/** Props for an `ESign`: exactly one of a signing page and a document. */
+export interface ESignProps {
+  url?: string;
+  document?: { src: string; filename?: string; mime?: string };
+  fields?: SignField[];
+  useAcroForm?: boolean;
+  flatten?: boolean;
+  signer?: { name?: string; email?: string };
+  title?: string;
+  intro?: string;
+  returnSignedCopy?: boolean;
+  submitLabel?: string;
+  help?: string;
+  session?: WebSession;
+}
+
+/** One stop on a delegated list. Rejects anything that is not https (or http on loopback). */
+export declare function webTaskItem(
+  id: string,
+  title: string,
+  url: string,
+  extra?: { note?: string; done?: string; optional?: boolean },
+): WebTaskItem;
+
+/** Props for WebTask. Rejects an empty list, duplicate ids, more than 32 items, and bad URLs. */
+export declare function webTask(
+  items: WebTaskItem[],
+  extra?: {
+    title?: string;
+    intro?: string;
+    session?: WebSession;
+    openIn?: "embedded" | "browser";
+    autoAdvance?: boolean;
+    allowSkip?: boolean;
+    returnFiles?: boolean;
+    submitLabel?: string;
+    help?: string;
+  },
+): WebTaskProps;
+
+export declare function sessionCookie(
+  name: string,
+  value: string,
+  domain: string,
+  extra?: {
+    path?: string;
+    secure?: boolean;
+    httpOnly?: boolean;
+    sameSite?: "lax" | "strict" | "none";
+    expires?: number;
+  },
+): SessionCookie;
+
+export declare function webOrigin(
+  origin: string,
+  localStorage?: { name: string; value: string }[],
+): WebOrigin;
+
+/** Rejects a session with nothing in it, or one past the caps the bridge enforces. */
+export declare function webSession(session?: {
+  cookies?: SessionCookie[];
+  origins?: WebOrigin[];
+  label?: string;
+  note?: string;
+}): WebSession;
+
+/** One field on a page. Rejects a kind the canvas cannot draw and coordinates outside the page. */
+export declare function signField(
+  id: string,
+  kind: SignFieldKind,
+  box: {
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+    page?: number;
+    label?: string;
+    required?: boolean;
+    value?: string;
+  },
+): SignField;
+
+/** Props for ESign. Rejects anything but exactly one of `url` and `document`. */
+export declare function esign(props?: {
+  url?: string;
+  document?: { src: string; filename?: string; mime?: string };
+  fields?: SignField[];
+  useAcroForm?: boolean;
+  flatten?: boolean;
+  signer?: { name?: string; email?: string };
+  title?: string;
+  intro?: string;
+  returnSignedCopy?: boolean;
+  submitLabel?: string;
+  help?: string;
+  session?: WebSession;
+}): ESignProps;
+
 export declare const components: {
   option: typeof option;
   fieldOption: typeof fieldOption;
@@ -846,6 +1028,13 @@ export declare const components: {
   pairMatrix: typeof pairMatrix;
   allocationItem: typeof allocationItem;
   allocateBudget: typeof allocateBudget;
+  webTaskItem: typeof webTaskItem;
+  webTask: typeof webTask;
+  sessionCookie: typeof sessionCookie;
+  webOrigin: typeof webOrigin;
+  webSession: typeof webSession;
+  signField: typeof signField;
+  esign: typeof esign;
 };
 
 export default Agent;

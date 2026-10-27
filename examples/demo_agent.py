@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """AuraUI demo agent — the happy path, in one readable script.
 
-Walks a human through all eleven AuraUI component kinds in turn: an ActionCard triage
+Walks a human through all thirteen AuraUI component kinds in turn: an ActionCard triage
 choice, a short WizardForm/ActionCard incident interview, a DataGrid row pick, a
 SortableList ordering, an InteractiveChart drill-down, a RatingScale confidence check,
-a per-hunk DiffReview, a RegionMark drawing on a picture, a PairMatrix, an AllocateBudget, and
-a closing Notice. Every answer is printed as it arrives, so the script doubles as a smoke
+a per-hunk DiffReview, a RegionMark drawing on a picture, a PairMatrix, an AllocateBudget, a
+WebTask queue, an ESign, and a closing Notice. Every answer is printed as it arrives, so the script doubles as a smoke
 test of the whole loop.
 
 Every card asks exactly one question. AuraUI shows one question at a time, so a card that
@@ -512,7 +512,91 @@ def run(agent: Agent) -> None:
     agent.note(f"Budget taken: {split}.", kind="meta")
     print()
 
-    # 11. Notice -----------------------------------------------------------
+    # 11. WebTask ----------------------------------------------------------
+    # The first kind here that is not answered by pressing something: the human works through
+    # pages on the web and reports back what happened on each one.
+    delegated = ask(
+        agent,
+        "WebTask: three errands on the web",
+        component="WebTask",
+        instruction="Three errands, and none of them is something I can do for you: each one needs "
+                    "a person on the other end.",
+        props=c.web_task(
+            [
+                c.web_task_item(
+                    "renew-insurance",
+                    "Renew the car insurance",
+                    "https://example.com/insurance/renew/8842",
+                    note="The quote is already at step three. Take the 12-month term, not the 6-month one.",
+                    done="a policy number is on the screen",
+                ),
+                c.web_task_item(
+                    "pay-invoice",
+                    "Pay the hosting invoice",
+                    "https://example.com/billing/invoices/2291",
+                    done="the invoice shows as paid",
+                ),
+                c.web_task_item(
+                    "book-slot",
+                    "Book the delivery slot",
+                    "https://example.com/deliveries/slots",
+                    done="a slot is confirmed",
+                    optional=True,
+                ),
+            ],
+            title="Three stops, in any order",
+            intro="Each row says what finished looks like, and every one has somewhere to write "
+                  "down what happened.",
+            return_files=True,
+            allow_skip=True,
+        ),
+    )
+    rows = (delegated.get("payload") or {}).get("tasks") or []
+    done_rows = [row.get("id") for row in rows if row.get("status") == "done"]
+    skipped_rows = [row.get("id") for row in rows if row.get("status") == "skipped"]
+    agent.note(
+        f"List back: {len(done_rows)} of {len(rows)} done"
+        + (f", skipped {', '.join(str(r) for r in skipped_rows)}" if skipped_rows else "")
+        + ".",
+        kind="result",
+    )
+    for row in rows:
+        if row.get("note"):
+            agent.note(f"  {row.get('id')}: {row.get('note')}", kind="meta")
+    print()
+
+    # 12. ESign ------------------------------------------------------------
+    # The provider shape: a signing page, opened in the embedded browser, with the finished file
+    # attached back. The other shape — an agent-supplied PDF filled and signed inside the canvas —
+    # is the same component with `document=` instead of `url=`.
+    signed = ask(
+        agent,
+        "ESign: the lease renewal",
+        component="ESign",
+        instruction="The lease renewal needs your signature before the end of the month. The "
+                    "provider is expecting you.",
+        props=c.esign(
+            # A real provider link is a long-lived URL issued by the provider's own portal; this
+            # one is a stand-in so the walkthrough needs no account anywhere.
+            url="https://example.com/lease-renewal/8821",
+            title="Residential lease renewal",
+            intro="The term is unchanged from last year. Sign it there, then attach the copy it "
+                  "gives you and I will file it with the rest.",
+            return_signed_copy=True,
+            submit_label="Send the signed copy",
+        ),
+    )
+    signed_payload = signed.get("payload") or {}
+    returned = signed_payload.get("document") or {}
+    agent.note(
+        "Signing confirmed"
+        + (f", with {returned.get('filename')} ({returned.get('size')} bytes) attached."
+           if returned else ", with no copy attached."),
+        kind="result",
+    )
+    print()
+
+    # 13. Notice -----------------------------------------------------------
     closed = ask(
         agent,
         "Notice success with a closing action",

@@ -2,7 +2,7 @@
 /**
  * AuraUI demo agent — the happy path, in one readable script.
  *
- * Walks a human through all eleven AuraUI component kinds in turn: an ActionCard triage
+ * Walks a human through all thirteen AuraUI component kinds in turn: an ActionCard triage
  * choice, a short WizardForm/ActionCard incident interview, a DataGrid row pick, a
  * SortableList ordering, an InteractiveChart drill-down, a RatingScale confidence check,
  * a per-hunk DiffReview, a RegionMark drawing on a picture, a PairMatrix, an AllocateBudget, and
@@ -453,7 +453,83 @@ async function run(agent) {
   agent.note(`Budget taken: ${JSON.stringify(split)}.`, "meta");
   console.log();
 
-  // 11. Notice -----------------------------------------------------------
+  // 11. WebTask ----------------------------------------------------------
+  // The first kind here that is not answered by pressing something: the human works through
+  // pages on the web and reports back what happened on each one.
+  const delegated = await ask(agent, "WebTask: three errands on the web", {
+    component: "WebTask",
+    instruction:
+      "Three errands, and none of them is something I can do for you: each one needs a person " +
+      "on the other end.",
+    props: c.webTask(
+      [
+        c.webTaskItem("renew-insurance", "Renew the car insurance", "https://example.com/insurance/renew/8842", {
+          note: "The quote is already at step three. Take the 12-month term, not the 6-month one.",
+          done: "a policy number is on the screen",
+        }),
+        c.webTaskItem("pay-invoice", "Pay the hosting invoice", "https://example.com/billing/invoices/2291", {
+          done: "the invoice shows as paid",
+        }),
+        c.webTaskItem("book-slot", "Book the delivery slot", "https://example.com/deliveries/slots", {
+          done: "a slot is confirmed",
+          optional: true,
+        }),
+      ],
+      {
+        title: "Three stops, in any order",
+        intro:
+          "Each row says what finished looks like, and every one has somewhere to write down " +
+          "what happened.",
+        returnFiles: true,
+        allowSkip: true,
+      },
+    ),
+  });
+  const rows = delegated.payload?.tasks ?? [];
+  const doneRows = rows.filter((row) => row.status === "done").map((row) => row.id);
+  const skippedRows = rows.filter((row) => row.status === "skipped").map((row) => row.id);
+  agent.note(
+    `List back: ${doneRows.length} of ${rows.length} done` +
+      (skippedRows.length > 0 ? `, skipped ${skippedRows.join(", ")}` : "") +
+      ".",
+    "result",
+  );
+  for (const row of rows) {
+    if (row.note) agent.note(`  ${row.id}: ${row.note}`, "meta");
+  }
+  console.log();
+
+  // 12. ESign ------------------------------------------------------------
+  // The provider shape: a signing page, opened in the embedded browser, with the finished file
+  // attached back. The other shape — an agent-supplied PDF filled and signed inside the canvas —
+  // is the same component with `document` instead of `url`.
+  const signed = await ask(agent, "ESign: the lease renewal", {
+    component: "ESign",
+    instruction:
+      "The lease renewal needs your signature before the end of the month. The provider is " +
+      "expecting you.",
+    props: c.esign({
+      // A real provider link is a long-lived URL issued by the provider's own portal; this one is
+      // a stand-in so the walkthrough needs no account anywhere.
+      url: "https://example.com/lease-renewal/8821",
+      title: "Residential lease renewal",
+      intro:
+        "The term is unchanged from last year. Sign it there, then attach the copy it gives you " +
+        "and I will file it with the rest.",
+      returnSignedCopy: true,
+      submitLabel: "Send the signed copy",
+    }),
+  });
+  const returned = signed.payload?.document ?? null;
+  agent.note(
+    returned
+      ? `Signing confirmed, with ${returned.filename} (${returned.size} bytes) attached.`
+      : "Signing confirmed, with no copy attached.",
+    "result",
+  );
+  console.log();
+
+  // 13. Notice -----------------------------------------------------------
   const closed = await ask(agent, "Notice success with a closing action", {
     component: "Notice",
     props: c.notice("success", {

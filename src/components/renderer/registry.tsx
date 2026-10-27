@@ -12,6 +12,8 @@ import DiffReview from "@/components/tasks/DiffReview";
 import RegionMark from "@/components/tasks/RegionMark";
 import PairMatrix from "@/components/tasks/PairMatrix";
 import AllocateBudget from "@/components/tasks/AllocateBudget";
+import WebTask from "@/components/tasks/WebTask";
+import ESign from "@/components/tasks/ESign";
 
 /**
  * The one place that knows which React component draws which protocol component.
@@ -76,6 +78,19 @@ export const REGISTRY: RendererRegistry = {
     component: AllocateBudget as TaskComponent,
     label: "Split",
     hint: "Share a total out across the lines.",
+  },
+  WebTask: {
+    component: WebTask as TaskComponent,
+    label: "Web task",
+    hint: "Work through these on the web and say what happened.",
+    // Both of these draw a page or a document, and a 672-pixel column is not a document.
+    wide: true,
+  },
+  ESign: {
+    component: ESign as TaskComponent,
+    label: "Signing",
+    hint: "Sign the document, or confirm you signed it where it lives.",
+    wide: true,
   },
 };
 
