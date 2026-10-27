@@ -1,8 +1,22 @@
 # AuraUI
 
-A Human-in-the-Loop task engine. An AI agent opens a local WebSocket and asks the human for
-something — a decision, a form, a row, an ordering, a drill-down — and gets the answer back
-as JSON on the same socket. No screenshots, no scraping, no HTML for the model to write.
+**The MCP Server for talking to Humans.**
+
+An agent asks; a card appears, built for the answer it wants rather than for a conversation. One
+press is the answer, and the answer comes back as the tool result. Not chat, not an attachment:
+
+- **Decide.** One press on the option that is right.
+- **Pick from real data.** A table or a chart bound to the numbers the agent supplies, never made up.
+- **Put things in order.** Drag or keyboard, then send.
+- **Judge a change.** Accept or reject each hunk of a diff.
+- **Mark up an image.** Boxes, circles, arrows, freehand.
+- **Hand over a page.** An embedded browser with the agent's session passed into it, so the person
+  picks up mid-flow: finish the checkout, submit the form, then mark each stop done with a note.
+- **Get it signed.** A PDF the canvas fills and signs, or the signing link, with the signed bytes
+  coming back.
+- **Ask for words.** Any field that needs a sentence has a Speak button beside the box.
+
+No screenshots, no scraping, no HTML for the model to write.
 
 ```
 external agent  ──ws://127.0.0.1:9090──▶  auraui-bridge  ──Tauri events──▶  canvas
@@ -10,7 +24,8 @@ external agent  ──ws://127.0.0.1:9090──▶  auraui-bridge  ──Tauri e
 ```
 
 The agent writes **the query and the schema**; the database supplies the numbers. A chart's
-data is bound in from the agent, never invented by the model. That is the whole design.
+data is bound in from the agent, never invented by the model. That is the rule for every card
+that shows data.
 
 ## How it presents itself
 
