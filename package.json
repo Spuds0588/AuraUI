@@ -17,6 +17,8 @@
     "app": "tauri dev",
     "app:build": "tauri build",
     "bridge": "cargo run --manifest-path src-tauri/Cargo.toml --bin auraui-bridge",
+    "mcp": "node mcp/server.mjs",
+    "mcp:config": "node mcp/config.mjs",
     "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml"
   },
   "dependencies": {

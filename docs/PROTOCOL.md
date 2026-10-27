@@ -1169,6 +1169,18 @@ the answer and the progress. The **off-line half**: an agent that stopped waitin
 and collects what the person said meanwhile. The second half is why the bridge keeps an answer
 instead of dropping it when the socket that asked has gone.
 
+### The MCP adapter that ships in this repository
+
+For hosts that only speak MCP, `mcp/server.mjs` is a stdio server that forwards to the same bridge:
+`ask_human`, `ask_human_many`, `collect_answer` and `list_components`, plus `auraui://protocol` as a
+resource. It is deliberately thin — no state, no queue, no knowledge of any component — so the
+semantics in this document still apply underneath it.
+
+Its one translation is worth knowing about: a host's tool call has a deadline, and a card does not.
+When `ask_human` runs out of time it returns `status: "pending"` with the task id instead of an
+error, and `collect_answer` picks the answer up afterwards from what the bridge retained. That is
+the off-line half above, reached through a tool result.
+
 ## 9. Running the bridge
 
 | Way | Command |
