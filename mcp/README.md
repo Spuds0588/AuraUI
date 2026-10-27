@@ -9,7 +9,7 @@ itself, and the bridge stays the gate that validates props, shows one card at a 
 answer for a client that stopped waiting.
 
 ```
-MCP host (Claude Code, Cursor, Claude Desktop)
+MCP host (Claude Code, Cursor, Claude Desktop, Freebuff Desktop)
    │  tools/call  ask_human
    ▼
 mcp/server.mjs  ──ws://127.0.0.1:9090──▶  AuraUI bridge  ──▶  card in front of a person
@@ -28,8 +28,16 @@ npm run mcp:config    # paste-ready setup for your host, with the absolute path 
 ```
 
 `npm run mcp:config` prints a one-line `claude mcp add` command and JSON blocks for
-`.mcp.json`, `.cursor/mcp.json`, Claude Desktop and `.vscode/mcp.json`. `npm run mcp:config --
---json` prints just the server entry, for a script that wants to merge it.
+`.mcp.json`, `.cursor/mcp.json`, Claude Desktop, `.vscode/mcp.json` and Freebuff Desktop. `npm run
+mcp:config -- --json` prints just the server entry, for a script that wants to merge it.
+
+Freebuff Desktop keeps its connectors in `~/.agents/mcp.json`, one file for every agent on the
+computer, and shows them on its Connectors page. Paste the block there or add it to that file,
+then press Refresh. The app runs nothing until you approve it: it names the command first and
+lists the tools it found so you can allow them. Two things to know about it, both from the app's
+side rather than this server's: an unapproved server is listed but never started, and a tool call
+the model makes has the same short deadline any host imposes, so a card you take your time over
+comes back as `status: "pending"` with a task id for `collect_answer`.
 
 The server reads `AURAUI_PORT` (default `9090`) if you moved the bridge.
 

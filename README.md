@@ -126,7 +126,8 @@ npm run app
 ```
 
 Then, from a second terminal, either point an MCP host at it, or write an agent against the SDK.
-For Claude Code, Cursor, Claude Desktop or VS Code, print the setup for this clone and paste it in:
+For Claude Code, Cursor, Claude Desktop, VS Code or Freebuff Desktop, print the setup for this
+clone and paste it in:
 
 ```bash
 npm run mcp:config          # claude mcp add … plus .mcp.json / .cursor/mcp.json blocks
