@@ -125,7 +125,19 @@ npm install
 npm run app
 ```
 
-Then, from a second terminal, ask the human something:
+Then, from a second terminal, either point an MCP host at it, or write an agent against the SDK.
+For Claude Code, Cursor, Claude Desktop or VS Code, print the setup for this clone and paste it in:
+
+```bash
+npm run mcp:config          # claude mcp add … plus .mcp.json / .cursor/mcp.json blocks
+```
+
+That is the whole setup: the local app, then one config line. Ask the assistant to list the AuraUI
+components to check the connection; from then on, when it needs a decision only you can make, it
+puts a card on screen instead of guessing. The four tools and the late-answer path are in
+[mcp/README.md](mcp/README.md).
+
+To write an agent instead:
 
 ```bash
 python3 examples/demo_agent.py     # standard library only, nothing to install
@@ -200,6 +212,7 @@ The full frame reference, every prop shape and the error codes are in
 | `clients/python/` | `auraui` — stdlib-only client, including a from-scratch RFC 6455 codec |
 | `clients/ts/` | `auraui-client` — plain ESM, hand-written types, no build step |
 | `examples/` | The same demo, one question per card, in both languages |
+| `mcp/` | The MCP server: four tools and the config printer, over the same bridge |
 | `pwa/` | The phone app: its own shell, service worker and manifest, over the same components |
 | `docs/PROTOCOL.md` | The wire contract. Read this before writing an agent. |
 | `docs/PWA-REMOTE.md` | Design note: pairing, the peer link, and waking a sleeping phone |
