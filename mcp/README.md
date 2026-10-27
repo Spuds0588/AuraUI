@@ -31,13 +31,22 @@ npm run mcp:config    # paste-ready setup for your host, with the absolute path 
 `.mcp.json`, `.cursor/mcp.json`, Claude Desktop, `.vscode/mcp.json` and Freebuff Desktop. `npm run
 mcp:config -- --json` prints just the server entry, for a script that wants to merge it.
 
-Freebuff Desktop keeps its connectors in `~/.agents/mcp.json`, one file for every agent on the
-computer, and shows them on its Connectors page. Paste the block there or add it to that file,
-then press Refresh. The app runs nothing until you approve it: it names the command first and
-lists the tools it found so you can allow them. Two things to know about it, both from the app's
-side rather than this server's: an unapproved server is listed but never started, and a tool call
-the model makes has the same short deadline any host imposes, so a card you take your time over
-comes back as `status: "pending"` with a task id for `collect_answer`.
+Freebuff Desktop is the host worth spelling out, because it is the one where a card can outlive the
+call that drew it:
+
+1. `npm run mcp:config` prints the block for `~/.agents/mcp.json`, one file for every agent on the
+   computer. Paste it into the app's **Connectors → Add MCP server**, or write it into that file
+   yourself and press Refresh.
+2. Nothing runs until you approve it: the app names the command it is about to execute, then lists
+   the tools it found so you can allow them.
+3. Start a new thread. Connectors are handed to the agent when its session starts, so the thread you
+   are already reading this in does not get them.
+
+Then mind the deadline. Freebuff Desktop ends a tool call at its own limit: here, an `ask_human`
+with `timeoutSeconds: 150` came back as `MCP error -32001: Request timed out` while its card was
+still on screen. Nothing was lost — the card kept its place on the canvas, and `collect_answer` on
+that task id returned the press three minutes later. Keep `timeoutSeconds` under what your host
+allows, or expect to collect the answer by id.
 
 The server reads `AURAUI_PORT` (default `9090`) if you moved the bridge.
 
