@@ -8,6 +8,7 @@
  *
  * `--json` prints the server entry alone, for a script that wants to merge it into a config file.
  */
+import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -26,6 +27,15 @@ if (process.argv.includes("--json")) {
 
 const mcpConfig = JSON.stringify({ mcpServers: { auraui: entry } }, null, 2);
 const vscodeConfig = JSON.stringify({ servers: { auraui: entry } }, null, 2);
+/**
+ * Freebuff Desktop keeps every connector a person adds in one file for the whole computer, so the
+ * block it wants is the same `mcpServers` shape and the only extra step is its own consent.
+ *
+ * The path is `~/.agents/mcp.json`, which its Connectors page also writes: an agent on this machine
+ * reads a server from here whether the person pasted it into the app or added it by hand. Nothing
+ * of it runs until the app's own approval names the command about to be executed.
+ */
+const agentsPath = join(homedir(), ".agents", "mcp.json");
 
 process.stdout.write(`AuraUI MCP server
   script   ${SERVER}
@@ -54,6 +64,14 @@ ${mcpConfig}
 VS Code — .vscode/mcp.json:
 
 ${vscodeConfig}
+
+Freebuff Desktop — ${agentsPath} (Connectors, then Refresh to pick it up):
+
+${mcpConfig}
+
+It runs nothing until you approve it there: the app shows the command first, and lists the tools it
+found so you can allow them. Approving covers one server, and the file is shared by every agent on
+this computer, so a second one you add here appears in the same list.
 
 Check it: ask the assistant to list the AuraUI components. It should call list_components and get
 thirteen back, each with what it asks. Then ask it something that needs a decision from you and it
